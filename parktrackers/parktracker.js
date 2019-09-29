@@ -32,7 +32,7 @@ class ParkTracker {
             .then((rideTimes) => {
                 let promises = rideTimes
                     .filter((ride) => this[TrackingRides].includes(ride.id))
-                    .filter((ride) => ride.active)
+                    .filter((ride) => ride.active && ride.waitTime !== null)
                     .map((ride) => dm.submitWaitTime(this[ParkID], ride));
                 return Promise.all(promises);
             })
