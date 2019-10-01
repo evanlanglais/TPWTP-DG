@@ -1,5 +1,6 @@
 const tp = require('themeparks');
 const ParkTracker = require('./parktracker');
+const tpi = new tp.Parks.WaltDisneyWorldEpcot();
 const park_id = "wdwe";
 const tracking_rides = [
     'WaltDisneyWorldEpcot_20194',
@@ -11,9 +12,7 @@ const tracking_rides = [
 
 class WDWEParkTracker extends ParkTracker {
     constructor() {
-        let park = new tp.Parks.WaltDisneyWorldEpcot();
-        // park.GetWaitTimes().then((rideTimes) => rideTimes.forEach((ride) => console.log(`${ride.id}: ${ride.name}`)));
-        super(park, park_id, tracking_rides);
+        super(tpi, park_id, tracking_rides);
     }
 }
 
