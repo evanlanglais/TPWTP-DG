@@ -1,4 +1,4 @@
-const dm = require('../data_manager');
+const dm = require('../data/data_manager');
 
 const ParkObject = Symbol('Park Object from themeparks API');
 const ParkID = Symbol('Park ID for data tracking purposes');
