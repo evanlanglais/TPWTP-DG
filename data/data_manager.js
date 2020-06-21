@@ -29,39 +29,40 @@ function registerRide(park_id, ride_id) {
 }
 module.exports.registerRide = registerRide;
 
-function submitWaitTime(park_id, ride) {
+function submitWaitTime(park_id, ride, park_time) {
     const collection = dbs[park_id].rides[ride.id];
-    const rn = moment();
-    const date_index = moment().startOf('day').toISOString();
+    const timestamp = `[${moment().format('LT')} local | ${park_time.format('LT')} park]`;
+    const park_date = new moment(park_time).startOf('day');
+    const date_index = park_date.toISOString();
     return new Promise((resolve, reject) => {
         collection.findOne({date: date_index}, async (err, result) => {
             if (err) {
-                console.error(err);
-                reject(err);
+                console.error(timestamp, err);
+                return reject(err);
             }
             if (!result) {
                 try {
-                    console.log(`Creating wait time doc for ${ride.id}`);
+                    console.log(timestamp, `Creating wait time doc for ${ride.id}`);
                     await createWaitTimeDocument(collection, ride);
-                    console.log(`Finished creating wait time doc for ${ride.id}`);
+                    console.log(timestamp, `Finished creating wait time doc for ${ride.id}`);
                 } catch (err) {
-                    console.error(err);
-                    reject(err);
+                    console.error(timestamp, err);
+                    return reject(err);
                 }
             }
 
-            const time_index = momentToIndex(rn);
-            console.log(`Submitting wait time at time index ${time_index} (${indexToMoment(moment(date_index), time_index).format('LT')}) for ${ride.id}`);
+            const time_index = momentToIndex(park_time);
+            console.log(timestamp, `Submitting wait time at time index ${time_index} (${indexToMoment(moment(date_index), time_index).format('LT')}) for ${ride.id}`);
             let update_obj = { $set: {}};
             update_obj.$set[`wait_times.${time_index}`] = ride.waitTime;
             collection.updateOne({date: date_index}, update_obj, (err, result) => {
                 if (err) {
-                    console.log(`Failed to submit wait time for ${ride.id}`);
+                    console.log(timestamp, `Failed to submit wait time for ${ride.id}`);
                     console.error(err);
-                    reject(err);
+                    return reject(err);
                 } else {
-                    console.log(`Successfully submitted wait time of ${ride.waitTime} for ${ride.id}`);
-                    resolve(result.result);
+                    console.log(timestamp, `Successfully submitted wait time of ${ride.waitTime} for ${ride.id}`);
+                    return resolve(result.result);
                 }
 
             })
