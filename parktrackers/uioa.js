@@ -17,11 +17,7 @@ const tracking_rides = [
     'UniversalIslandsOfAdventure_13799',
     'UniversalIslandsOfAdventure_17097'
 ];
-/*
-(tpi.GetWaitTimes().then((rideTimes) => {
-    return rideTimes.map(ride => console.log(`${ride.id}: ${ride.name}`));
-});
-*/
+
 class UIOAParkTracker extends ParkTracker {
     constructor() {
         super(tpi, park_id, tracking_rides);
