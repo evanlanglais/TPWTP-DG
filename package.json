@@ -11,8 +11,8 @@
   "license": "ISC",
   "dependencies": {
     "dotenv": "^8.0.0",
-    "moment": "^2.24.0",
-    "mongodb": "^3.3.0-beta2",
-    "themeparks": "^5.1.12"
+    "moment": "^2.27.0",
+    "mongodb": "^3.6.0",
+    "themeparks": "^5.1.39"
   }
 }
