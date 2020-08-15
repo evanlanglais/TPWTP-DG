@@ -37,7 +37,7 @@ class ParkTracker {
                 return Promise.all(promises);
             })
             .catch((error) => {
-                console.error(error);
+                return console.error(error);
             })
             .finally(() => {
                 return setTimeout( () => this.StartRideTracking() , 1000 * 60 * 5); // refresh every 5 minutes
