@@ -38,10 +38,8 @@ class ParkTracker {
             })
             .catch((error) => {
                 console.error(error);
-                console.info(`Re-registering ${this[ParkID]}`);
-                return this.RegisterPark().then(() => setTimeout( () => this.StartRideTracking() , 1000 * 60 * 5));
             })
-            .then(() => {
+            .finally(() => {
                 return setTimeout( () => this.StartRideTracking() , 1000 * 60 * 5); // refresh every 5 minutes
             });
     };

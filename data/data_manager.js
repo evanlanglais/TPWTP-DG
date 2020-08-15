@@ -25,6 +25,7 @@ function registerPark(park_id) {
 module.exports.registerPark = registerPark;
 
 function registerRide(park_id, ride_id) {
+    console.log(`Registering ${ride_id}`);
     return Promise.resolve(dbs[park_id].rides[ride_id] = dbs[park_id].db.collection(ride_id));
 }
 module.exports.registerRide = registerRide;
