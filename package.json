@@ -13,6 +13,6 @@
     "dotenv": "^8.0.0",
     "moment": "^2.27.0",
     "mongodb": "^3.6.0",
-    "themeparks": "^5.1.40"
+    "themeparks": "github:cubehouse/themeparks#6prev"
   }
 }
