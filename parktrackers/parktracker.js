@@ -1,4 +1,5 @@
 const dm = require('../data/data_manager');
+const moment = require('moment');
 
 const ParkObject = Symbol('Park Object from themeparks API');
 const ParkID = Symbol('Park ID for data tracking purposes');
@@ -28,6 +29,7 @@ class ParkTracker {
     }
 
     StartRideTracking() {
+        console.log(this.timestamp, "Invoking time snapshot");
         return this[ParkObject].GetWaitTimes()
             .then((rideTimes) => {
                 let promises = rideTimes
@@ -37,12 +39,21 @@ class ParkTracker {
                 return Promise.all(promises);
             })
             .catch((error) => {
-                return console.error(error);
+                return console.error(this.timestamp, error);
             })
             .finally(() => {
+                console.log(this.timestamp, "Finished time snapshot");
                 return setTimeout( () => this.StartRideTracking() , 1000 * 60 * 5); // refresh every 5 minutes
             });
     };
+
+    get parkTime() {
+        return this[ParkObject].Now();
+    }
+
+    get timestamp() {
+        return `[${this[ParkID]} | ${moment().format('LT')} local | ${this.parkTime.format('LT')} park]`;
+    }
 }
 
 module.exports = ParkTracker;
