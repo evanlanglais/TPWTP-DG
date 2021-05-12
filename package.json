@@ -13,6 +13,6 @@
     "dotenv": "^8.0.0",
     "moment": "^2.27.0",
     "mongodb": "^3.6.1",
-    "themeparks": "^5.1.42"
+    "themeparks": "^5.1.47"
   }
 }
