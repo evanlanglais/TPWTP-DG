@@ -15,7 +15,8 @@ const tracking_rides = [
     'UniversalIslandsOfAdventure_10862',
     'UniversalIslandsOfAdventure_13225',
     'UniversalIslandsOfAdventure_13799',
-    'UniversalIslandsOfAdventure_17097'
+    'UniversalIslandsOfAdventure_17097',
+    'UniversalIslandsOfAdventure_18154'
 ];
 
 class UIOAParkTracker extends ParkTracker {
