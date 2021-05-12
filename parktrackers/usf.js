@@ -15,8 +15,7 @@ const tracking_rides = [
     'UniversalStudiosFlorida_13221',
     'UniversalStudiosFlorida_13228',
     'UniversalStudiosFlorida_14348',
-    'UniversalStudiosFlorida_16061',
-    'UniversalStudiosFlorida_17924',
+    'UniversalStudiosFlorida_17924'
 ];
 
 class USFParkTracker extends ParkTracker {
