@@ -22,13 +22,11 @@ function registerPark(park_id) {
             console.error(err);
         });
 }
-module.exports.registerPark = registerPark;
 
 function registerRide(park_id, ride_id) {
     console.log(`Registering ${ride_id}`);
     return Promise.resolve(dbs[park_id].rides[ride_id] = dbs[park_id].db.collection(ride_id));
 }
-module.exports.registerRide = registerRide;
 
 function submitWaitTime(park_id, ride, park_time) {
     const collection = dbs[park_id].rides[ride.id];
@@ -71,7 +69,6 @@ function submitWaitTime(park_id, ride, park_time) {
     });
 }
 
-module.exports.submitWaitTime = submitWaitTime;
 
 function createWaitTimeDocument(collection, ride, time = moment()) {
     const time_doc = {
@@ -105,4 +102,31 @@ function momentToIndex(time) {
 
 function indexToMoment(time_base, time_index) {
     return time_base.add(time_index * 5, 'm');
+}
+
+const metadata_db = 'trackingconfig';
+const park_metadata_collection = 'park_metadata';
+
+async function GetRideIdsForPark(park_id)
+{
+    try
+    {
+        await client.connect();
+        const db = client.db(metadata_db);
+        const park_metadata = db.collection(park_metadata_collection);
+
+        let park_data = await park_metadata.findOne({ id: park_id }, { projection: {rides: 1}});
+
+        return park_data.rides;
+    } catch (e) {
+        console.error('Unable to get rides for park!', e);
+    }
+}
+
+module.exports =
+{
+    registerPark,
+    registerRide,
+    submitWaitTime,
+    GetRideIdsForPark
 }

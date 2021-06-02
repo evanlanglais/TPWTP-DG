@@ -7,15 +7,24 @@ const TrackingRides = Symbol('Array of ride id\'s for tracking purposes');
 
 class ParkTracker {
 
-    constructor(park_object, park_id, tracking_rides = []) {
+    constructor(park_object, park_id) {
         if (this.constructor === ParkTracker) {
             throw new TypeError('Cannot create Parktracker directly');
         }
         this[ParkObject] = park_object;
         this[ParkID] = park_id;
-        this[TrackingRides] = tracking_rides;
-        this.RegisterPark().then(() => this.StartRideTracking());
+        this.populateTrackingRides(park_id)
+            .then(() => this.RegisterPark())
+            .then(() => this.StartRideTracking())
+            .catch((e) => {
+                console.error(`Unable to begin tracking rides for ${park_id}`);
+            })
     };
+
+    async populateTrackingRides(park_id)
+    {
+        this[TrackingRides] = await dm.GetRideIdsForPark(park_id);
+    }
 
     RegisterPark() {
         return dm.registerPark(this[ParkID]).then(() => {
