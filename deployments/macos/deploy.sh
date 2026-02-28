@@ -56,7 +56,8 @@ build_binary() {
     # Pull latest if this is a git repo
     if [[ -d ".git" ]]; then
         log_info "Pulling latest changes..."
-        sudo -u "${SUDO_USER:-$(whoami)}" git pull origin master || true
+        BRANCH=$(sudo -u "${SUDO_USER:-$(whoami)}" git rev-parse --abbrev-ref HEAD)
+        sudo -u "${SUDO_USER:-$(whoami)}" git pull origin "${BRANCH}" || true
     fi
 
     # Build

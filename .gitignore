@@ -1,5 +1,6 @@
 # Binaries
-collector
+/bin/
+/tpwtp-collector
 *.exe
 
 # Environment
