@@ -17,6 +17,31 @@ import (
 	"github.com/evanlanglais/tpwtp-dg/migrations"
 )
 
+// levelRouter sends ERROR+ to stderr and everything else to stdout.
+type levelRouter struct {
+	stdout slog.Handler
+	stderr slog.Handler
+}
+
+func (r *levelRouter) Enabled(_ context.Context, level slog.Level) bool {
+	return r.stdout.Enabled(nil, level) || r.stderr.Enabled(nil, level)
+}
+
+func (r *levelRouter) Handle(ctx context.Context, rec slog.Record) error {
+	if rec.Level >= slog.LevelError {
+		return r.stderr.Handle(ctx, rec)
+	}
+	return r.stdout.Handle(ctx, rec)
+}
+
+func (r *levelRouter) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &levelRouter{stdout: r.stdout.WithAttrs(attrs), stderr: r.stderr.WithAttrs(attrs)}
+}
+
+func (r *levelRouter) WithGroup(name string) slog.Handler {
+	return &levelRouter{stdout: r.stdout.WithGroup(name), stderr: r.stderr.WithGroup(name)}
+}
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -36,7 +61,10 @@ func main() {
 	default:
 		level = slog.LevelInfo
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+	slog.SetDefault(slog.New(&levelRouter{
+		stdout: slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}),
+		stderr: slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}),
+	}))
 
 	// Context with signal handling for graceful shutdown
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
