@@ -226,6 +226,62 @@ func (s *Store) GetParkIDs(ctx context.Context) ([]string, error) {
 	return ids, rows.Err()
 }
 
+// PruneUntrackedParks removes all data for parks not in the given set of destination IDs.
+// Deletes cascade: wait_times → attractions → parks → orphaned destinations.
+func (s *Store) PruneUntrackedParks(ctx context.Context, trackedDestIDs []string) error {
+	if len(trackedDestIDs) == 0 {
+		return nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning prune transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Delete wait_times for attractions in untracked parks
+	_, err = tx.Exec(ctx, `
+		DELETE FROM wait_times
+		WHERE attraction_id IN (
+			SELECT a.id FROM attractions a
+			JOIN parks p ON a.park_id = p.id
+			WHERE p.destination_id != ALL($1::uuid[])
+		)
+	`, trackedDestIDs)
+	if err != nil {
+		return fmt.Errorf("pruning wait_times: %w", err)
+	}
+
+	// Delete attractions in untracked parks
+	_, err = tx.Exec(ctx, `
+		DELETE FROM attractions
+		WHERE park_id IN (
+			SELECT id FROM parks WHERE destination_id != ALL($1::uuid[])
+		)
+	`, trackedDestIDs)
+	if err != nil {
+		return fmt.Errorf("pruning attractions: %w", err)
+	}
+
+	// Delete untracked parks
+	_, err = tx.Exec(ctx, `
+		DELETE FROM parks WHERE destination_id != ALL($1::uuid[])
+	`, trackedDestIDs)
+	if err != nil {
+		return fmt.Errorf("pruning parks: %w", err)
+	}
+
+	// Delete untracked destinations
+	_, err = tx.Exec(ctx, `
+		DELETE FROM destinations WHERE id != ALL($1::uuid[])
+	`, trackedDestIDs)
+	if err != nil {
+		return fmt.Errorf("pruning destinations: %w", err)
+	}
+
+	return tx.Commit(ctx)
+}
+
 // GetKnownAttractionIDs returns a set of all attraction IDs in the database for a given park.
 func (s *Store) GetKnownAttractionIDs(ctx context.Context, parkID string) (map[string]bool, error) {
 	rows, err := s.pool.Query(ctx,

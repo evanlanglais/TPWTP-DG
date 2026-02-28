@@ -11,6 +11,66 @@ import (
 	"github.com/evanlanglais/tpwtp-dg/internal/store"
 )
 
+// usDestinations is the set of destination slugs for US-based parks.
+var usDestinations = map[string]bool{
+	// Disney
+	"waltdisneyworldresort": true,
+	"disneylandresort":     true,
+	// Universal
+	"universalorlando": true,
+	"universalstudios": true, // Hollywood
+	// SeaWorld / Busch Gardens
+	"seaworldorlandoresort":   true,
+	"seaworldsandiego":        true,
+	"seaworldsanantonio":      true,
+	"buschgardenstampa":       true,
+	"buschgardenswillamsburg": true,
+	// Cedar Fair
+	"cedar-point":        true,
+	"knotts-berry-farm":  true,
+	"kings-island":       true,
+	"kings-dominion":     true,
+	"carowinds":          true,
+	"great-america":      true,
+	"dorney-park":        true,
+	"valleyfair":         true,
+	"michigans-adventure": true,
+	"worlds-of-fun":      true,
+	// Six Flags
+	"six-flags-magic-mountain":    true,
+	"six-flags-great-adventure":   true,
+	"six-flags-great-america":     true,
+	"six-flags-over-texas":        true,
+	"six-flags-over-georgia":      true,
+	"six-flags-fiesta-texas":      true,
+	"six-flags-new-england":       true,
+	"six-flags-america":           true,
+	"six-flags-discovery-kingdom": true,
+	"six-flags-st-louis":          true,
+	"six-flags-great-escape":      true,
+	"six-flags-darien-lake":       true,
+	"six-flags-frontier-city":     true,
+	"six-flags-white-water-atlanta": true,
+	// Water parks
+	"hurricane-harbor-oklahoma-city": true,
+	"hurricane-harbor-rockford":      true,
+	"hurricane-harbor-splashtown":    true,
+	"hurricane-harbor-concord":       true,
+	"hurricane-harbor-phoenix":       true,
+	"schlitterbahn-nb":               true,
+	"schlitterbahn-gv":               true,
+	// Independent / Other
+	"dollywood":        true,
+	"hersheypark":      true,
+	"silverdollarcity": true,
+	"kennywood":        true,
+	"knoebels":         true,
+	"legolandcaliforniaresort":              true,
+	"legolandorlandoresort":                 true,
+	"legolandnewyorkdestination":            true,
+	"peppapigthemeparkfloridadestination":   true,
+}
+
 // Collector polls the themeparks.wiki API and writes wait times to the store.
 type Collector struct {
 	client   *api.Client
@@ -76,6 +136,9 @@ func (c *Collector) syncReferenceData(ctx context.Context) error {
 	var parkIDs []string
 
 	for _, d := range destResp.Destinations {
+		if !usDestinations[d.Slug] {
+			continue
+		}
 		destinations = append(destinations, store.Destination{
 			ID:   d.ID,
 			Name: d.Name,
@@ -97,6 +160,16 @@ func (c *Collector) syncReferenceData(ctx context.Context) error {
 	if err := c.store.UpsertDestinations(ctx, destinations); err != nil {
 		return err
 	}
+
+	// Prune any previously-tracked non-US data from the database
+	destIDs := make([]string, len(destinations))
+	for i, d := range destinations {
+		destIDs[i] = d.ID
+	}
+	if err := c.store.PruneUntrackedParks(ctx, destIDs); err != nil {
+		slog.Error("failed to prune untracked parks", "error", err)
+	}
+
 	slog.Info("synced destinations", "count", len(destinations))
 
 	// Upsert parks
