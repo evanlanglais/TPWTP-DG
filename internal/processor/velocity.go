@@ -20,16 +20,20 @@ const (
 // VelocityMetric computes wait time velocity (rate of change) and trend
 // direction for each attraction per poll interval.
 type VelocityMetric struct {
-	store *store.Store
+	store    *store.Store
+	emaState map[string]*float32 // attractionID → last EMA value
 }
 
 // NewVelocityMetric creates a new VelocityMetric.
 func NewVelocityMetric(s *store.Store) *VelocityMetric {
-	return &VelocityMetric{store: s}
+	return &VelocityMetric{
+		store:    s,
+		emaState: make(map[string]*float32),
+	}
 }
 
 func (v *VelocityMetric) Name() string           { return "velocity" }
-func (v *VelocityMetric) Version() int            { return 1 }
+func (v *VelocityMetric) Version() int            { return 2 }
 func (v *VelocityMetric) OutputTables() []string   { return []string{"l2_wait_velocity"} }
 
 func (v *VelocityMetric) Process(ctx context.Context, since, now time.Time) error {
@@ -42,12 +46,6 @@ func (v *VelocityMetric) Process(ctx context.Context, since, now time.Time) erro
 		return nil
 	}
 
-	// Group deltas by attraction to compute EMA across the window
-	type attractionState struct {
-		ema *float32
-	}
-	emaState := make(map[string]*attractionState)
-
 	var velocities []store.WaitVelocity
 
 	for _, d := range deltas {
@@ -58,28 +56,24 @@ func (v *VelocityMetric) Process(ctx context.Context, since, now time.Time) erro
 			continue
 		}
 
-		st, ok := emaState[d.AttractionID]
-		if !ok {
-			st = &attractionState{}
-			emaState[d.AttractionID] = st
-		}
-
 		delta := float32(*d.Delta)
 
-		// Update EMA
-		if st.ema == nil {
-			st.ema = &delta
+		// Update EMA, carrying state across Process() calls
+		prev := v.emaState[d.AttractionID]
+		var ema float32
+		if prev == nil {
+			ema = delta
 		} else {
-			ema := float32(emaAlpha)*delta + float32(1-emaAlpha)*(*st.ema)
-			st.ema = &ema
+			ema = float32(emaAlpha)*delta + float32(1-emaAlpha)*(*prev)
 		}
+		v.emaState[d.AttractionID] = &ema
 
 		// Classify trend based on EMA
 		var trend string
 		switch {
-		case *st.ema > stableThreshold:
+		case ema > stableThreshold:
 			trend = "RISING"
-		case *st.ema < -stableThreshold:
+		case ema < -stableThreshold:
 			trend = "FALLING"
 		default:
 			trend = "STABLE"
@@ -89,7 +83,7 @@ func (v *VelocityMetric) Process(ctx context.Context, since, now time.Time) erro
 			AttractionID: d.AttractionID,
 			Timestamp:    d.Timestamp,
 			Velocity:     &delta,
-			VelocityEMA:  st.ema,
+			VelocityEMA:  &ema,
 			Trend:        trend,
 			SampleCount:  d.SampleCount,
 		})
