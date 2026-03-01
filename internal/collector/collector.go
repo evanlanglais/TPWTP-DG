@@ -78,6 +78,9 @@ type Collector struct {
 	store     *store.Store
 	processor *processor.Processor
 	interval  time.Duration
+
+	lastSeenMu sync.Mutex
+	lastSeen   map[string]*lastObservation
 }
 
 // New creates a new Collector.
@@ -87,6 +90,7 @@ func New(client *api.Client, store *store.Store, interval time.Duration) *Collec
 		store:     store,
 		processor: processor.New(store),
 		interval:  interval,
+		lastSeen:  make(map[string]*lastObservation),
 	}
 }
 
@@ -390,6 +394,13 @@ func (c *Collector) pollPark(ctx context.Context, parkID string) (int, error) {
 		} else {
 			slog.Info("discovered new attractions", "park_id", parkID, "count", len(newAttrs))
 		}
+	}
+
+	// Filter out unchanged non-OPERATING rows to reduce storage
+	var skipped int
+	waitTimes, skipped = filterUnchanged(waitTimes, c.lastSeen, &c.lastSeenMu)
+	if skipped > 0 {
+		slog.Debug("skipped unchanged non-operating rows", "park_id", parkID, "skipped", skipped)
 	}
 
 	inserted, err := c.store.InsertWaitTimes(ctx, waitTimes)
