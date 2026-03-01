@@ -64,23 +64,51 @@ func (p *Processor) RunAfterPoll(ctx context.Context, pollTimestamp time.Time) {
 	)
 }
 
+// backfillChunkSize is the time window processed per iteration during backfill.
+const backfillChunkSize = 1 * time.Hour
+
 // processMetric reads the cursor, runs the metric, and updates the cursor.
+// When no cursor exists, it backfills from the earliest wait_time in 1-hour chunks.
 func (p *Processor) processMetric(ctx context.Context, m Metric, now time.Time) error {
 	since, err := p.store.GetProcessingCursor(ctx, m.Name())
 	if err != nil {
 		return err
 	}
 
-	// If no cursor, start from 30 minutes ago to have enough lookback data
 	if since.IsZero() {
-		since = now.Add(-30 * time.Minute)
+		earliest, err := p.store.GetEarliestWaitTime(ctx)
+		if err != nil {
+			return err
+		}
+		if earliest.IsZero() {
+			return nil // no data yet
+		}
+		since = earliest.Add(-1 * time.Minute)
+		slog.Info("backfilling layer 2 metric",
+			"metric", m.Name(),
+			"from", since.Format(time.RFC3339),
+		)
 	}
 
-	if err := m.Process(ctx, since, now); err != nil {
-		return err
+	// Process in chunks to avoid overwhelming queries on large backlogs
+	for since.Before(now) {
+		chunkEnd := since.Add(backfillChunkSize)
+		if chunkEnd.After(now) {
+			chunkEnd = now
+		}
+
+		if err := m.Process(ctx, since, chunkEnd); err != nil {
+			return err
+		}
+
+		since = chunkEnd
+		// Save cursor after each chunk so progress isn't lost on failure
+		if err := p.store.SetProcessingCursor(ctx, m.Name(), since); err != nil {
+			return err
+		}
 	}
 
-	return p.store.SetProcessingCursor(ctx, m.Name(), now)
+	return nil
 }
 
 // refreshViews refreshes all Layer 2 materialized views.

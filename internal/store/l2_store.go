@@ -30,6 +30,19 @@ type WaitVelocity struct {
 	SampleCount  int16
 }
 
+// GetEarliestWaitTime returns the earliest timestamp in the wait_times table.
+// Returns zero time if the table is empty.
+func (s *Store) GetEarliestWaitTime(ctx context.Context) (time.Time, error) {
+	var t time.Time
+	err := s.pool.QueryRow(ctx,
+		"SELECT min(timestamp) FROM wait_times",
+	).Scan(&t)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("getting earliest wait time: %w", err)
+	}
+	return t, nil
+}
+
 // GetProcessingCursor returns the last-processed timestamp for the given metric.
 // Returns zero time if no cursor exists yet.
 func (s *Store) GetProcessingCursor(ctx context.Context, metricName string) (time.Time, error) {
