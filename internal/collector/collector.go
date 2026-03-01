@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/evanlanglais/tpwtp-dg/internal/api"
+	"github.com/evanlanglais/tpwtp-dg/internal/processor"
 	"github.com/evanlanglais/tpwtp-dg/internal/store"
 )
 
@@ -73,17 +74,19 @@ var usDestinations = map[string]bool{
 
 // Collector polls the themeparks.wiki API and writes wait times to the store.
 type Collector struct {
-	client   *api.Client
-	store    *store.Store
-	interval time.Duration
+	client    *api.Client
+	store     *store.Store
+	processor *processor.Processor
+	interval  time.Duration
 }
 
 // New creates a new Collector.
 func New(client *api.Client, store *store.Store, interval time.Duration) *Collector {
 	return &Collector{
-		client:   client,
-		store:    store,
-		interval: interval,
+		client:    client,
+		store:     store,
+		processor: processor.New(store),
+		interval:  interval,
 	}
 }
 
@@ -295,12 +298,17 @@ func (c *Collector) pollAllParks(ctx context.Context) {
 
 	wg.Wait()
 
+	pollTimestamp := time.Now().UTC()
+
 	slog.Info("poll complete",
 		"parks_polled", parksPolled.Load(),
 		"wait_times_recorded", totalWaitTimes.Load(),
 		"errors", errorCount.Load(),
 		"duration", time.Since(start).Round(time.Millisecond),
 	)
+
+	// Run Layer 2 derived data processing
+	c.processor.RunAfterPoll(ctx, pollTimestamp)
 }
 
 // pollPark fetches live data for a single park and inserts wait times.
