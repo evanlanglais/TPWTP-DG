@@ -156,7 +156,7 @@ func (s *Store) InsertWaitVelocities(ctx context.Context, velocities []WaitVeloc
 
 // ensureL2VelocityPartition creates a monthly partition for l2_wait_velocity.
 func (s *Store) ensureL2VelocityPartition(ctx context.Context, t time.Time) error {
-	year, month, _ := t.Date()
+	year, month, _ := t.UTC().Date()
 	key := fmt.Sprintf("l2v_%d_%02d", year, month)
 
 	if _, ok := s.partitions.Load(key); ok {
