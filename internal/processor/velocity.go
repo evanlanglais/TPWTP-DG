@@ -49,49 +49,48 @@ func (v *VelocityMetric) Process(ctx context.Context, since, now time.Time) erro
 	var velocities []store.WaitVelocity
 
 	for _, d := range deltas {
+		// Skip non-operating attractions and rows without a computable delta.
+		// Closed/down status is already captured by l2_status_transitions,
+		// and first-observations (no prior data point) carry no velocity info.
+		if d.Status != "OPERATING" || d.Delta == nil {
+			continue
+		}
+
 		st, ok := emaState[d.AttractionID]
 		if !ok {
 			st = &attractionState{}
 			emaState[d.AttractionID] = st
 		}
 
-		vel := store.WaitVelocity{
+		delta := float32(*d.Delta)
+
+		// Update EMA
+		if st.ema == nil {
+			st.ema = &delta
+		} else {
+			ema := float32(emaAlpha)*delta + float32(1-emaAlpha)*(*st.ema)
+			st.ema = &ema
+		}
+
+		// Classify trend based on EMA
+		var trend string
+		switch {
+		case *st.ema > stableThreshold:
+			trend = "RISING"
+		case *st.ema < -stableThreshold:
+			trend = "FALLING"
+		default:
+			trend = "STABLE"
+		}
+
+		velocities = append(velocities, store.WaitVelocity{
 			AttractionID: d.AttractionID,
 			Timestamp:    d.Timestamp,
+			Velocity:     &delta,
+			VelocityEMA:  st.ema,
+			Trend:        trend,
 			SampleCount:  d.SampleCount,
-		}
-
-		// Classify trend
-		switch {
-		case d.Status != "OPERATING":
-			vel.Trend = "CLOSED"
-		case d.Delta != nil:
-			delta := float32(*d.Delta)
-			vel.Velocity = &delta
-
-			// Update EMA
-			if st.ema == nil {
-				st.ema = &delta
-			} else {
-				ema := float32(emaAlpha)*delta + float32(1-emaAlpha)*(*st.ema)
-				st.ema = &ema
-			}
-			vel.VelocityEMA = st.ema
-
-			// Classify based on EMA
-			switch {
-			case *st.ema > stableThreshold:
-				vel.Trend = "RISING"
-			case *st.ema < -stableThreshold:
-				vel.Trend = "FALLING"
-			default:
-				vel.Trend = "STABLE"
-			}
-		default:
-			vel.Trend = "UNKNOWN"
-		}
-
-		velocities = append(velocities, vel)
+		})
 	}
 
 	inserted, err := v.store.InsertWaitVelocities(ctx, velocities)
