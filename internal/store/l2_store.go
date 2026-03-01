@@ -196,29 +196,35 @@ func (s *Store) ensureL2VelocityPartition(ctx context.Context, t time.Time) erro
 
 // DetectAndInsertStatusTransitions finds status changes in wait_times between
 // since and until, and inserts them into l2_status_transitions.
+// Uses a LATERAL join to find each row's actual predecessor, which handles
+// gaps from deduplication of unchanged non-OPERATING rows.
 // Returns the number of transitions inserted.
 func (s *Store) DetectAndInsertStatusTransitions(ctx context.Context, since, until time.Time) (int, error) {
-	lookback := since.Add(-10 * time.Minute)
 	tag, err := s.pool.Exec(ctx, `
-		WITH windowed AS (
-			SELECT
-				attraction_id,
-				timestamp,
-				status,
-				LAG(status) OVER w AS prev_status,
-				EXTRACT(EPOCH FROM timestamp - LAG(timestamp) OVER w)::INT AS duration_seconds
+		WITH current_rows AS (
+			SELECT attraction_id, timestamp, status
 			FROM wait_times
 			WHERE timestamp > $1
 			  AND timestamp <= $2
-			WINDOW w AS (PARTITION BY attraction_id ORDER BY timestamp)
 		)
 		INSERT INTO l2_status_transitions (attraction_id, transition_time, previous_status, new_status, duration_seconds)
-		SELECT attraction_id, timestamp, prev_status, status, duration_seconds
-		FROM windowed
-		WHERE prev_status IS NOT NULL
-		  AND prev_status != status
-		  AND timestamp > $3
-	`, lookback, until, since)
+		SELECT
+			cr.attraction_id,
+			cr.timestamp,
+			prev.status,
+			cr.status,
+			EXTRACT(EPOCH FROM cr.timestamp - prev.timestamp)::INT
+		FROM current_rows cr
+		CROSS JOIN LATERAL (
+			SELECT w.status, w.timestamp
+			FROM wait_times w
+			WHERE w.attraction_id = cr.attraction_id
+			  AND w.timestamp < cr.timestamp
+			ORDER BY w.timestamp DESC
+			LIMIT 1
+		) prev
+		WHERE prev.status != cr.status
+	`, since, until)
 	if err != nil {
 		return 0, fmt.Errorf("detecting status transitions: %w", err)
 	}
