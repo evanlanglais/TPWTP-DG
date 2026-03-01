@@ -24,7 +24,7 @@ func NewCrowdPressureMetric(s *store.Store) *CrowdPressureMetric {
 }
 
 func (c *CrowdPressureMetric) Name() string           { return "crowd_pressure" }
-func (c *CrowdPressureMetric) Version() int            { return 2 }
+func (c *CrowdPressureMetric) Version() int            { return 3 }
 func (c *CrowdPressureMetric) OutputTables() []string   { return []string{"l3_park_crowd_pressure"} }
 
 func (c *CrowdPressureMetric) Process(ctx context.Context, since, now time.Time) error {
@@ -35,6 +35,27 @@ func (c *CrowdPressureMetric) Process(ctx context.Context, since, now time.Time)
 
 	if len(snapshots) == 0 {
 		return nil
+	}
+
+	// Seed EMA state from DB for parks we haven't seen this process lifetime
+	hasMissing := false
+	for _, s := range snapshots {
+		if _, ok := c.emaState[s.ParkID]; !ok {
+			hasMissing = true
+			break
+		}
+	}
+	if hasMissing {
+		seeds, err := c.store.GetLatestPressureEMAs(ctx, since)
+		if err != nil {
+			return err
+		}
+		for id, ema := range seeds {
+			if _, ok := c.emaState[id]; !ok {
+				e := ema
+				c.emaState[id] = &e
+			}
+		}
 	}
 
 	// Group snapshots by (parkID, timestamp)

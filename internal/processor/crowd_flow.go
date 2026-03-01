@@ -48,7 +48,7 @@ func NewCrowdFlowMetric(s *store.Store) *CrowdFlowMetric {
 }
 
 func (f *CrowdFlowMetric) Name() string           { return "crowd_flow" }
-func (f *CrowdFlowMetric) Version() int            { return 2 }
+func (f *CrowdFlowMetric) Version() int            { return 3 }
 func (f *CrowdFlowMetric) OutputTables() []string   { return []string{"l3_transition_impact"} }
 
 func (f *CrowdFlowMetric) Process(ctx context.Context, since, now time.Time) error {

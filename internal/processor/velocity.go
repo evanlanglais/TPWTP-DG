@@ -33,7 +33,7 @@ func NewVelocityMetric(s *store.Store) *VelocityMetric {
 }
 
 func (v *VelocityMetric) Name() string           { return "velocity" }
-func (v *VelocityMetric) Version() int            { return 2 }
+func (v *VelocityMetric) Version() int            { return 3 }
 func (v *VelocityMetric) OutputTables() []string   { return []string{"l2_wait_velocity"} }
 
 func (v *VelocityMetric) Process(ctx context.Context, since, now time.Time) error {
@@ -44,6 +44,28 @@ func (v *VelocityMetric) Process(ctx context.Context, since, now time.Time) erro
 
 	if len(deltas) == 0 {
 		return nil
+	}
+
+	// Seed EMA state from DB for attractions we haven't seen this process lifetime
+	missing := make(map[string]bool)
+	for _, d := range deltas {
+		if _, ok := v.emaState[d.AttractionID]; !ok {
+			missing[d.AttractionID] = true
+		}
+	}
+	if len(missing) > 0 {
+		ids := make([]string, 0, len(missing))
+		for id := range missing {
+			ids = append(ids, id)
+		}
+		seeds, err := v.store.GetLatestVelocityEMAs(ctx, ids, since)
+		if err != nil {
+			return err
+		}
+		for id, ema := range seeds {
+			e := ema
+			v.emaState[id] = &e
+		}
 	}
 
 	var velocities []store.WaitVelocity

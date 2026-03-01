@@ -35,7 +35,7 @@ func NewCorrelationMetric(s *store.Store) *CorrelationMetric {
 }
 
 func (c *CorrelationMetric) Name() string           { return "correlation" }
-func (c *CorrelationMetric) Version() int            { return 2 }
+func (c *CorrelationMetric) Version() int            { return 3 }
 func (c *CorrelationMetric) OutputTables() []string   { return []string{"l3_correlation_pairs"} }
 
 func (c *CorrelationMetric) Process(ctx context.Context, since, now time.Time) error {

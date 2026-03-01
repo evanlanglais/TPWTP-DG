@@ -103,6 +103,62 @@ func (s *Store) TruncateTables(ctx context.Context, tables []string) error {
 	return nil
 }
 
+// GetLatestVelocityEMAs returns the most recent velocity_ema for each of the
+// given attraction IDs before the specified timestamp. Used to seed in-memory
+// EMA state after a process restart.
+func (s *Store) GetLatestVelocityEMAs(ctx context.Context, attractionIDs []string, before time.Time) (map[string]float32, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT ON (attraction_id) attraction_id, velocity_ema
+		FROM l2_wait_velocity
+		WHERE attraction_id = ANY($1)
+		  AND timestamp <= $2
+		  AND velocity_ema IS NOT NULL
+		ORDER BY attraction_id, timestamp DESC
+	`, attractionIDs, before)
+	if err != nil {
+		return nil, fmt.Errorf("querying latest velocity EMAs: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]float32)
+	for rows.Next() {
+		var id string
+		var ema float32
+		if err := rows.Scan(&id, &ema); err != nil {
+			return nil, fmt.Errorf("scanning velocity EMA: %w", err)
+		}
+		result[id] = ema
+	}
+	return result, rows.Err()
+}
+
+// GetLatestPressureEMAs returns the most recent pressure_ema for each park
+// before the specified timestamp. Used to seed in-memory EMA state after a
+// process restart.
+func (s *Store) GetLatestPressureEMAs(ctx context.Context, before time.Time) (map[string]float32, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT ON (park_id) park_id, pressure_ema
+		FROM l3_park_crowd_pressure
+		WHERE timestamp <= $1
+		ORDER BY park_id, timestamp DESC
+	`, before)
+	if err != nil {
+		return nil, fmt.Errorf("querying latest pressure EMAs: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]float32)
+	for rows.Next() {
+		var id string
+		var ema float32
+		if err := rows.Scan(&id, &ema); err != nil {
+			return nil, fmt.Errorf("scanning pressure EMA: %w", err)
+		}
+		result[id] = ema
+	}
+	return result, rows.Err()
+}
+
 // GetRecentWaitTimeDeltas returns per-attraction wait time deltas for the given
 // time window using a LAG() window function. Each row includes the current and
 // previous standby wait plus a running count of non-null observations.
