@@ -12,6 +12,11 @@ import (
 type Metric interface {
 	// Name returns the unique identifier for this metric (used as cursor key).
 	Name() string
+	// Version returns the logic version for this metric. Bump this when the
+	// computation logic changes to trigger automatic purge and re-backfill.
+	Version() int
+	// OutputTables returns the table names this metric writes to.
+	OutputTables() []string
 	// Process computes the metric for data between since and now.
 	Process(ctx context.Context, since time.Time, now time.Time) error
 }
@@ -72,10 +77,27 @@ const backfillChunkSize = 1 * time.Hour
 
 // processMetric reads the cursor, runs the metric, and updates the cursor.
 // When no cursor exists, it backfills from the earliest wait_time in 1-hour chunks.
+// If the metric's logic version has changed since the last run, output tables
+// are truncated and the cursor is reset, triggering a full re-backfill.
 func (p *Processor) processMetric(ctx context.Context, m Metric, now time.Time) error {
-	since, err := p.store.GetProcessingCursor(ctx, m.Name())
+	since, storedVersion, err := p.store.GetProcessingCursor(ctx, m.Name())
 	if err != nil {
 		return err
+	}
+
+	if storedVersion != 0 && storedVersion != m.Version() {
+		slog.Info("metric version changed, purging and re-backfilling",
+			"metric", m.Name(),
+			"old_version", storedVersion,
+			"new_version", m.Version(),
+		)
+		if err := p.store.TruncateTables(ctx, m.OutputTables()); err != nil {
+			return err
+		}
+		if err := p.store.DeleteProcessingCursor(ctx, m.Name()); err != nil {
+			return err
+		}
+		since = time.Time{}
 	}
 
 	if since.IsZero() {
@@ -106,7 +128,7 @@ func (p *Processor) processMetric(ctx context.Context, m Metric, now time.Time) 
 
 		since = chunkEnd
 		// Save cursor after each chunk so progress isn't lost on failure
-		if err := p.store.SetProcessingCursor(ctx, m.Name(), since); err != nil {
+		if err := p.store.SetProcessingCursor(ctx, m.Name(), since, m.Version()); err != nil {
 			return err
 		}
 	}

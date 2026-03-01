@@ -28,7 +28,9 @@ func NewVelocityMetric(s *store.Store) *VelocityMetric {
 	return &VelocityMetric{store: s}
 }
 
-func (v *VelocityMetric) Name() string { return "velocity" }
+func (v *VelocityMetric) Name() string           { return "velocity" }
+func (v *VelocityMetric) Version() int            { return 1 }
+func (v *VelocityMetric) OutputTables() []string   { return []string{"l2_wait_velocity"} }
 
 func (v *VelocityMetric) Process(ctx context.Context, since, now time.Time) error {
 	deltas, err := v.store.GetRecentWaitTimeDeltas(ctx, since, now)

@@ -19,7 +19,9 @@ func NewTransitionsMetric(s *store.Store) *TransitionsMetric {
 	return &TransitionsMetric{store: s}
 }
 
-func (t *TransitionsMetric) Name() string { return "transitions" }
+func (t *TransitionsMetric) Name() string           { return "transitions" }
+func (t *TransitionsMetric) Version() int            { return 1 }
+func (t *TransitionsMetric) OutputTables() []string   { return []string{"l2_status_transitions"} }
 
 func (t *TransitionsMetric) Process(ctx context.Context, since, now time.Time) error {
 	n, err := t.store.DetectAndInsertStatusTransitions(ctx, since, now)

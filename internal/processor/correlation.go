@@ -34,7 +34,9 @@ func NewCorrelationMetric(s *store.Store) *CorrelationMetric {
 	return &CorrelationMetric{store: s, lastHour: -1}
 }
 
-func (c *CorrelationMetric) Name() string { return "correlation" }
+func (c *CorrelationMetric) Name() string           { return "correlation" }
+func (c *CorrelationMetric) Version() int            { return 1 }
+func (c *CorrelationMetric) OutputTables() []string   { return []string{"l3_correlation_pairs"} }
 
 func (c *CorrelationMetric) Process(ctx context.Context, since, now time.Time) error {
 	// Only compute on hour boundaries

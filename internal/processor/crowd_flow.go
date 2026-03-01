@@ -47,7 +47,9 @@ func NewCrowdFlowMetric(s *store.Store) *CrowdFlowMetric {
 	return &CrowdFlowMetric{store: s}
 }
 
-func (f *CrowdFlowMetric) Name() string { return "crowd_flow" }
+func (f *CrowdFlowMetric) Name() string           { return "crowd_flow" }
+func (f *CrowdFlowMetric) Version() int            { return 1 }
+func (f *CrowdFlowMetric) OutputTables() []string   { return []string{"l3_transition_impact"} }
 
 func (f *CrowdFlowMetric) Process(ctx context.Context, since, now time.Time) error {
 	// Shift the query window back by the lag so cursor advancement doesn't

@@ -23,7 +23,9 @@ func NewCrowdPressureMetric(s *store.Store) *CrowdPressureMetric {
 	}
 }
 
-func (c *CrowdPressureMetric) Name() string { return "crowd_pressure" }
+func (c *CrowdPressureMetric) Name() string           { return "crowd_pressure" }
+func (c *CrowdPressureMetric) Version() int            { return 1 }
+func (c *CrowdPressureMetric) OutputTables() []string   { return []string{"l3_park_crowd_pressure"} }
 
 func (c *CrowdPressureMetric) Process(ctx context.Context, since, now time.Time) error {
 	snapshots, err := c.store.GetParkVelocitySnapshots(ctx, since, now)

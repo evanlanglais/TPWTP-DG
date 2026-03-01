@@ -43,34 +43,62 @@ func (s *Store) GetEarliestWaitTime(ctx context.Context) (time.Time, error) {
 	return t, nil
 }
 
-// GetProcessingCursor returns the last-processed timestamp for the given metric.
-// Returns zero time if no cursor exists yet.
-func (s *Store) GetProcessingCursor(ctx context.Context, metricName string) (time.Time, error) {
+// GetProcessingCursor returns the last-processed timestamp and logic version for
+// the given metric. Returns (zero time, 0, nil) if no cursor exists yet.
+func (s *Store) GetProcessingCursor(ctx context.Context, metricName string) (time.Time, int, error) {
 	var t time.Time
+	var version int
 	err := s.pool.QueryRow(ctx,
-		"SELECT last_processed FROM l2_processing_cursors WHERE metric_name = $1",
+		"SELECT last_processed, logic_version FROM l2_processing_cursors WHERE metric_name = $1",
 		metricName,
-	).Scan(&t)
+	).Scan(&t, &version)
 	if err == pgx.ErrNoRows {
-		return time.Time{}, nil
+		return time.Time{}, 0, nil
 	}
 	if err != nil {
-		return time.Time{}, fmt.Errorf("getting cursor for %s: %w", metricName, err)
+		return time.Time{}, 0, fmt.Errorf("getting cursor for %s: %w", metricName, err)
 	}
-	return t, nil
+	return t, version, nil
 }
 
-// SetProcessingCursor upserts the cursor timestamp for a metric.
-func (s *Store) SetProcessingCursor(ctx context.Context, metricName string, t time.Time) error {
+// SetProcessingCursor upserts the cursor timestamp and logic version for a metric.
+func (s *Store) SetProcessingCursor(ctx context.Context, metricName string, t time.Time, version int) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO l2_processing_cursors (metric_name, last_processed, updated_at)
-		VALUES ($1, $2, now())
+		INSERT INTO l2_processing_cursors (metric_name, last_processed, logic_version, updated_at)
+		VALUES ($1, $2, $3, now())
 		ON CONFLICT (metric_name) DO UPDATE SET
 			last_processed = EXCLUDED.last_processed,
+			logic_version = EXCLUDED.logic_version,
 			updated_at = now()
-	`, metricName, t)
+	`, metricName, t, version)
 	if err != nil {
 		return fmt.Errorf("setting cursor for %s: %w", metricName, err)
+	}
+	return nil
+}
+
+// DeleteProcessingCursor removes the cursor row for a metric, used when
+// logic version changes to trigger a full re-backfill.
+func (s *Store) DeleteProcessingCursor(ctx context.Context, metricName string) error {
+	_, err := s.pool.Exec(ctx,
+		"DELETE FROM l2_processing_cursors WHERE metric_name = $1",
+		metricName,
+	)
+	if err != nil {
+		return fmt.Errorf("deleting cursor for %s: %w", metricName, err)
+	}
+	return nil
+}
+
+// TruncateTables truncates each of the given tables. Used to purge stale
+// derived data when a metric's logic version changes.
+func (s *Store) TruncateTables(ctx context.Context, tables []string) error {
+	for _, table := range tables {
+		sql := fmt.Sprintf("TRUNCATE TABLE %s", table)
+		if _, err := s.pool.Exec(ctx, sql); err != nil {
+			return fmt.Errorf("truncating table %s: %w", table, err)
+		}
+		slog.Info("truncated table for metric re-backfill", "table", table)
 	}
 	return nil
 }
