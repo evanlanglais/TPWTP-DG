@@ -35,6 +35,9 @@ func New(s *store.Store) *Processor {
 	p.metrics = []Metric{
 		NewVelocityMetric(s),
 		NewTransitionsMetric(s),
+		NewCrowdPressureMetric(s),
+		NewCorrelationMetric(s),
+		NewCrowdFlowMetric(s),
 	}
 	return p
 }
@@ -59,7 +62,7 @@ func (p *Processor) RunAfterPoll(ctx context.Context, pollTimestamp time.Time) {
 		p.lastRefresh = time.Now()
 	}
 
-	slog.Info("layer 2 processing complete",
+	slog.Info("derived data processing complete",
 		"duration", time.Since(start).Round(time.Millisecond),
 	)
 }
