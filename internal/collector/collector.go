@@ -81,16 +81,20 @@ type Collector struct {
 
 	lastSeenMu sync.Mutex
 	lastSeen   map[string]*lastObservation
+
+	scheduleMu    sync.RWMutex
+	scheduleCache map[string][]scheduleWindow
 }
 
 // New creates a new Collector.
 func New(client *api.Client, store *store.Store, interval time.Duration) *Collector {
 	return &Collector{
-		client:    client,
-		store:     store,
-		processor: processor.New(store),
-		interval:  interval,
-		lastSeen:  make(map[string]*lastObservation),
+		client:        client,
+		store:         store,
+		processor:     processor.New(store),
+		interval:      interval,
+		lastSeen:      make(map[string]*lastObservation),
+		scheduleCache: make(map[string][]scheduleWindow),
 	}
 }
 
@@ -100,6 +104,9 @@ func (c *Collector) Run(ctx context.Context) error {
 	if err := c.syncReferenceData(ctx); err != nil {
 		return err
 	}
+
+	// Sync park schedules (for park-closed filtering)
+	c.syncSchedules(ctx)
 
 	// Run first poll immediately
 	c.pollAllParks(ctx)
@@ -122,6 +129,7 @@ func (c *Collector) Run(ctx context.Context) error {
 			if err := c.syncReferenceData(ctx); err != nil {
 				slog.Error("daily reference data refresh failed", "error", err)
 			}
+			c.syncSchedules(ctx)
 		}
 	}
 }
@@ -393,6 +401,16 @@ func (c *Collector) pollPark(ctx context.Context, parkID string) (int, error) {
 			slog.Error("failed to upsert new attractions", "park_id", parkID, "count", len(newAttrs), "error", err)
 		} else {
 			slog.Info("discovered new attractions", "park_id", parkID, "count", len(newAttrs))
+		}
+	}
+
+	// Filter out OPERATING rides when park is closed
+	if !c.isParkOpen(parkID, now) {
+		var parkClosedFiltered int
+		waitTimes, parkClosedFiltered = filterParkClosed(waitTimes)
+		if parkClosedFiltered > 0 {
+			slog.Debug("filtered operating rides during park closure",
+				"park_id", parkID, "filtered", parkClosedFiltered)
 		}
 	}
 

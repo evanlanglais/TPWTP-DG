@@ -77,3 +77,19 @@ type ReturnTimeQueue struct {
 	ReturnStart *string `json:"returnStart"`
 	ReturnEnd   *string `json:"returnEnd"`
 }
+
+// EntityScheduleResponse is the response from GET /v1/entity/{id}/schedule.
+type EntityScheduleResponse struct {
+	ID         string          `json:"id"`
+	Name       string          `json:"name"`
+	EntityType string          `json:"entityType"`
+	Timezone   string          `json:"timezone"`
+	Schedule   []ScheduleEntry `json:"schedule"`
+}
+
+type ScheduleEntry struct {
+	Date        string    `json:"date"`
+	Type        string    `json:"type"`
+	OpeningTime time.Time `json:"openingTime"`
+	ClosingTime time.Time `json:"closingTime"`
+}

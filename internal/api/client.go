@@ -96,3 +96,13 @@ func (c *Client) GetEntityLive(ctx context.Context, entityID string) (*EntityLiv
 	}
 	return &resp, nil
 }
+
+// GetEntitySchedule returns schedule data for the given entity (typically a park).
+func (c *Client) GetEntitySchedule(ctx context.Context, entityID string) (*EntityScheduleResponse, error) {
+	slog.Debug("fetching schedule", "entity_id", entityID)
+	var resp EntityScheduleResponse
+	if err := c.get(ctx, "/entity/"+entityID+"/schedule", &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
