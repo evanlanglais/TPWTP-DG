@@ -34,28 +34,43 @@ CREATE INDEX IF NOT EXISTS idx_l3_correlation_computed
 CREATE INDEX IF NOT EXISTS idx_l3_correlation_park_computed
     ON l3_correlation_pairs (park_id, computed_at);
 
--- Closure impact: how closing one ride affects nearby rides' wait times
-CREATE TABLE IF NOT EXISTS l3_closure_impact (
-    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    transition_id       BIGINT       NOT NULL,
-    closed_attraction   UUID         NOT NULL REFERENCES attractions(id),
-    impacted_attraction UUID         NOT NULL REFERENCES attractions(id),
-    park_id             UUID         NOT NULL REFERENCES parks(id),
-    closure_time        TIMESTAMPTZ  NOT NULL,
-    velocity_before     REAL,
-    velocity_after      REAL,
-    velocity_delta      REAL,
-    wait_before         INT,
-    wait_after          INT,
-    wait_delta          INT,
-    absorption_score    REAL
+-- Transition impact: how ride closures and openings affect surrounding rides
+-- event_type: 'CLOSURE' (OPERATING→non-OPERATING) or 'OPENING' (non-OPERATING→OPERATING)
+-- baseline_delta: velocity change over 30 min BEFORE the event (pre-existing trend)
+-- excess_delta: velocity_delta - baseline_delta (portion attributable to the event)
+-- Only rows where excess_delta is in the expected direction are stored:
+--   closures: excess_delta > 0 (ride accelerated beyond pre-existing trend)
+--   openings: excess_delta < 0 (ride decelerated beyond pre-existing trend)
+-- absorption_score: for closures, normalized share of excess_delta (sums to 1.0)
+-- drain_score: for openings, normalized share of |excess_delta| (sums to 1.0)
+CREATE TABLE IF NOT EXISTS l3_transition_impact (
+    id                      BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    transition_id           BIGINT       NOT NULL,
+    event_type              TEXT         NOT NULL,
+    transitioned_attraction UUID         NOT NULL REFERENCES attractions(id),
+    impacted_attraction     UUID         NOT NULL REFERENCES attractions(id),
+    park_id                 UUID         NOT NULL REFERENCES parks(id),
+    transition_time         TIMESTAMPTZ  NOT NULL,
+    velocity_before         REAL,
+    velocity_after          REAL,
+    velocity_delta          REAL,
+    baseline_delta          REAL,
+    excess_delta            REAL,
+    wait_before             INT,
+    wait_after              INT,
+    wait_delta              INT,
+    absorption_score        REAL,
+    drain_score             REAL
 );
 
-CREATE INDEX IF NOT EXISTS idx_l3_closure_transition
-    ON l3_closure_impact (transition_id);
+CREATE INDEX IF NOT EXISTS idx_l3_transition_transition_id
+    ON l3_transition_impact (transition_id);
 
-CREATE INDEX IF NOT EXISTS idx_l3_closure_park_time
-    ON l3_closure_impact (park_id, closure_time);
+CREATE INDEX IF NOT EXISTS idx_l3_transition_park_time
+    ON l3_transition_impact (park_id, transition_time);
 
-CREATE INDEX IF NOT EXISTS idx_l3_closure_attraction_time
-    ON l3_closure_impact (closed_attraction, closure_time);
+CREATE INDEX IF NOT EXISTS idx_l3_transition_attraction_time
+    ON l3_transition_impact (transitioned_attraction, transition_time);
+
+CREATE INDEX IF NOT EXISTS idx_l3_transition_event_type
+    ON l3_transition_impact (event_type, transition_time);

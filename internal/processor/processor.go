@@ -49,7 +49,7 @@ func (p *Processor) RunAfterPoll(ctx context.Context, pollTimestamp time.Time) {
 
 	for _, m := range p.metrics {
 		if err := p.processMetric(ctx, m, pollTimestamp); err != nil {
-			slog.Warn("layer 2 metric failed",
+			slog.Warn("metric failed",
 				"metric", m.Name(),
 				"error", err,
 			)
@@ -87,7 +87,7 @@ func (p *Processor) processMetric(ctx context.Context, m Metric, now time.Time) 
 			return nil // no data yet
 		}
 		since = earliest.Add(-1 * time.Minute)
-		slog.Info("backfilling layer 2 metric",
+		slog.Info("backfilling metric",
 			"metric", m.Name(),
 			"from", since.Format(time.RFC3339),
 		)

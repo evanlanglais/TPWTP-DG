@@ -48,23 +48,27 @@ type TimestampedValue struct {
 	Value     float32
 }
 
-// ClosureImpact records how one ride's closure affected another ride.
-type ClosureImpact struct {
-	TransitionID       int64
-	ClosedAttraction   string
-	ImpactedAttraction string
-	ParkID             string
-	ClosureTime        time.Time
-	VelocityBefore     *float32
-	VelocityAfter      *float32
-	VelocityDelta      *float32
-	WaitBefore         *int
-	WaitAfter          *int
-	WaitDelta          *int
-	AbsorptionScore    *float32
+// TransitionImpact records how one ride's closure or opening affected another ride.
+type TransitionImpact struct {
+	TransitionID           int64
+	EventType              string // "CLOSURE" or "OPENING"
+	TransitionedAttraction string
+	ImpactedAttraction     string
+	ParkID                 string
+	TransitionTime         time.Time
+	VelocityBefore         *float32
+	VelocityAfter          *float32
+	VelocityDelta          *float32
+	BaselineDelta          *float32
+	ExcessDelta            *float32
+	WaitBefore             *int
+	WaitAfter              *int
+	WaitDelta              *int
+	AbsorptionScore        *float32
+	DrainScore             *float32
 }
 
-// StatusTransitionRecord is a closure event from l2_status_transitions.
+// StatusTransitionRecord is a transition event from l2_status_transitions.
 type StatusTransitionRecord struct {
 	ID             int64
 	AttractionID   string
@@ -278,6 +282,39 @@ func (s *Store) GetRecentClosures(ctx context.Context, since, until time.Time) (
 	return transitions, rows.Err()
 }
 
+// GetRecentOpenings returns non-OPERATING→OPERATING transitions from l2_status_transitions
+// within the given time window, joined with attraction data to get park_id.
+func (s *Store) GetRecentOpenings(ctx context.Context, since, until time.Time) ([]StatusTransitionRecord, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT st.id, st.attraction_id, a.park_id, st.transition_time,
+			   st.previous_status, st.new_status
+		FROM l2_status_transitions st
+		JOIN attractions a ON a.id = st.attraction_id
+		WHERE st.transition_time > $1
+		  AND st.transition_time <= $2
+		  AND st.previous_status != 'OPERATING'
+		  AND st.new_status = 'OPERATING'
+		ORDER BY st.transition_time
+	`, since, until)
+	if err != nil {
+		return nil, fmt.Errorf("querying recent openings: %w", err)
+	}
+	defer rows.Close()
+
+	var transitions []StatusTransitionRecord
+	for rows.Next() {
+		var t StatusTransitionRecord
+		if err := rows.Scan(
+			&t.ID, &t.AttractionID, &t.ParkID, &t.TransitionTime,
+			&t.PreviousStatus, &t.NewStatus,
+		); err != nil {
+			return nil, fmt.Errorf("scanning opening: %w", err)
+		}
+		transitions = append(transitions, t)
+	}
+	return transitions, rows.Err()
+}
+
 // GetVelocityAndWaitAtTime returns a snapshot of velocity EMA + wait time for all
 // operating attractions in a park at a specific point in time (within tolerance).
 func (s *Store) GetVelocityAndWaitAtTime(ctx context.Context, parkID string, target time.Time, tolerance time.Duration) ([]AttractionSnapshot, error) {
@@ -313,8 +350,8 @@ func (s *Store) GetVelocityAndWaitAtTime(ctx context.Context, parkID string, tar
 	return snapshots, rows.Err()
 }
 
-// InsertClosureImpacts batch-inserts closure impact records.
-func (s *Store) InsertClosureImpacts(ctx context.Context, impacts []ClosureImpact) (int, error) {
+// InsertTransitionImpacts batch-inserts transition impact records (closures and openings).
+func (s *Store) InsertTransitionImpacts(ctx context.Context, impacts []TransitionImpact) (int, error) {
 	if len(impacts) == 0 {
 		return 0, nil
 	}
@@ -323,33 +360,38 @@ func (s *Store) InsertClosureImpacts(ctx context.Context, impacts []ClosureImpac
 	for i, imp := range impacts {
 		copyRows[i] = []any{
 			imp.TransitionID,
-			imp.ClosedAttraction,
+			imp.EventType,
+			imp.TransitionedAttraction,
 			imp.ImpactedAttraction,
 			imp.ParkID,
-			imp.ClosureTime,
+			imp.TransitionTime,
 			imp.VelocityBefore,
 			imp.VelocityAfter,
 			imp.VelocityDelta,
+			imp.BaselineDelta,
+			imp.ExcessDelta,
 			imp.WaitBefore,
 			imp.WaitAfter,
 			imp.WaitDelta,
 			imp.AbsorptionScore,
+			imp.DrainScore,
 		}
 	}
 
 	n, err := s.pool.CopyFrom(ctx,
-		pgx.Identifier{"l3_closure_impact"},
+		pgx.Identifier{"l3_transition_impact"},
 		[]string{
-			"transition_id", "closed_attraction", "impacted_attraction",
-			"park_id", "closure_time",
+			"transition_id", "event_type", "transitioned_attraction", "impacted_attraction",
+			"park_id", "transition_time",
 			"velocity_before", "velocity_after", "velocity_delta",
+			"baseline_delta", "excess_delta",
 			"wait_before", "wait_after", "wait_delta",
-			"absorption_score",
+			"absorption_score", "drain_score",
 		},
 		pgx.CopyFromRows(copyRows),
 	)
 	if err != nil {
-		return 0, fmt.Errorf("bulk inserting closure impacts: %w", err)
+		return 0, fmt.Errorf("bulk inserting transition impacts: %w", err)
 	}
 	return int(n), nil
 }
