@@ -66,6 +66,7 @@ func (s *Store) SetProcessingCursor(ctx context.Context, metricName string, t ti
 // time window using a LAG() window function. Each row includes the current and
 // previous standby wait plus a running count of non-null observations.
 func (s *Store) GetRecentWaitTimeDeltas(ctx context.Context, since, until time.Time) ([]WaitTimeDelta, error) {
+	lookback := since.Add(-30 * time.Minute)
 	rows, err := s.pool.Query(ctx, `
 		WITH windowed AS (
 			SELECT
@@ -80,7 +81,7 @@ func (s *Store) GetRecentWaitTimeDeltas(ctx context.Context, since, until time.T
 					PARTITION BY attraction_id ORDER BY timestamp
 				)::SMALLINT AS sample_count
 			FROM wait_times
-			WHERE timestamp > $1 - INTERVAL '30 minutes'
+			WHERE timestamp > $1
 			  AND timestamp <= $2
 		)
 		SELECT
@@ -94,10 +95,10 @@ func (s *Store) GetRecentWaitTimeDeltas(ctx context.Context, since, until time.T
 			END AS delta,
 			sample_count
 		FROM windowed
-		WHERE timestamp > $1
+		WHERE timestamp > $3
 		  AND timestamp <= $2
 		ORDER BY attraction_id, timestamp
-	`, since, until)
+	`, lookback, until, since)
 	if err != nil {
 		return nil, fmt.Errorf("querying wait time deltas: %w", err)
 	}
@@ -184,6 +185,7 @@ func (s *Store) ensureL2VelocityPartition(ctx context.Context, t time.Time) erro
 // since and until, and inserts them into l2_status_transitions.
 // Returns the number of transitions inserted.
 func (s *Store) DetectAndInsertStatusTransitions(ctx context.Context, since, until time.Time) (int, error) {
+	lookback := since.Add(-10 * time.Minute)
 	tag, err := s.pool.Exec(ctx, `
 		WITH windowed AS (
 			SELECT
@@ -193,7 +195,7 @@ func (s *Store) DetectAndInsertStatusTransitions(ctx context.Context, since, unt
 				LAG(status) OVER w AS prev_status,
 				EXTRACT(EPOCH FROM timestamp - LAG(timestamp) OVER w)::INT AS duration_seconds
 			FROM wait_times
-			WHERE timestamp > $1 - INTERVAL '10 minutes'
+			WHERE timestamp > $1
 			  AND timestamp <= $2
 			WINDOW w AS (PARTITION BY attraction_id ORDER BY timestamp)
 		)
@@ -202,8 +204,8 @@ func (s *Store) DetectAndInsertStatusTransitions(ctx context.Context, since, unt
 		FROM windowed
 		WHERE prev_status IS NOT NULL
 		  AND prev_status != status
-		  AND timestamp > $1
-	`, since, until)
+		  AND timestamp > $3
+	`, lookback, until, since)
 	if err != nil {
 		return 0, fmt.Errorf("detecting status transitions: %w", err)
 	}

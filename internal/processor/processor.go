@@ -46,7 +46,7 @@ func (p *Processor) RunAfterPoll(ctx context.Context, pollTimestamp time.Time) {
 
 	for _, m := range p.metrics {
 		if err := p.processMetric(ctx, m, pollTimestamp); err != nil {
-			slog.Error("layer 2 metric failed",
+			slog.Warn("layer 2 metric failed",
 				"metric", m.Name(),
 				"error", err,
 			)
