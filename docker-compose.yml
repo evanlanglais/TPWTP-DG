@@ -7,3 +7,7 @@ services:
       API_CONCURRENCY: ${API_CONCURRENCY:-15}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     restart: unless-stopped
+
+networks:
+  default:
+    enable_ipv6: true
