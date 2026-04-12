@@ -5,6 +5,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
       POLL_INTERVAL: ${POLL_INTERVAL:-5m}
       API_CONCURRENCY: ${API_CONCURRENCY:-15}
+      API_TIMEOUT: ${API_TIMEOUT:-10s}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     restart: unless-stopped
 
