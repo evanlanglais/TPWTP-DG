@@ -7,6 +7,8 @@ services:
       API_CONCURRENCY: ${API_CONCURRENCY:-15}
       API_TIMEOUT: ${API_TIMEOUT:-10s}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      WEATHER_API_KEY: ${WEATHER_API_KEY}
+      WEATHER_POLL_INTERVAL: ${WEATHER_POLL_INTERVAL:-30m}
     restart: unless-stopped
 
   # One-off legacy backfill: adopts historical wait_times into raw_observations.
