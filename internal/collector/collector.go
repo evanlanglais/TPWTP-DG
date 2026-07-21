@@ -13,6 +13,7 @@ import (
 	"github.com/evanlanglais/tpwtp-dg/internal/api"
 	"github.com/evanlanglais/tpwtp-dg/internal/processor"
 	"github.com/evanlanglais/tpwtp-dg/internal/store"
+	"github.com/evanlanglais/tpwtp-dg/internal/weather"
 )
 
 // usDestinations is the set of destination slugs for US-based parks.
@@ -82,6 +83,10 @@ type Collector struct {
 	processor *processor.Processor
 	interval  time.Duration
 
+	// weather is nil when no WEATHER_API_KEY is configured (weather source disabled).
+	weather         *weather.Client
+	weatherInterval time.Duration
+
 	lastSeenMu sync.Mutex
 	lastSeen   map[string]*lastObservation
 
@@ -89,15 +94,17 @@ type Collector struct {
 	scheduleCache map[string][]scheduleWindow
 }
 
-// New creates a new Collector.
-func New(client *api.Client, store *store.Store, interval time.Duration) *Collector {
+// New creates a new Collector. weatherClient may be nil to disable the weather source.
+func New(client *api.Client, weatherClient *weather.Client, store *store.Store, interval, weatherInterval time.Duration) *Collector {
 	return &Collector{
-		client:        client,
-		store:         store,
-		processor:     processor.New(store),
-		interval:      interval,
-		lastSeen:      make(map[string]*lastObservation),
-		scheduleCache: make(map[string][]scheduleWindow),
+		client:          client,
+		store:           store,
+		processor:       processor.New(store),
+		interval:        interval,
+		weather:         weatherClient,
+		weatherInterval: weatherInterval,
+		lastSeen:        make(map[string]*lastObservation),
+		scheduleCache:   make(map[string][]scheduleWindow),
 	}
 }
 
@@ -121,6 +128,16 @@ func (c *Collector) Run(ctx context.Context) error {
 	refreshTicker := time.NewTicker(24 * time.Hour)
 	defer refreshTicker.Stop()
 
+	// Weather runs as a sibling source on its own slower cadence, only when configured.
+	// A nil channel blocks forever, so the select case never fires when disabled.
+	var weatherC <-chan time.Time
+	if c.weather != nil {
+		c.pollAllWeather(ctx) // first weather poll immediately
+		weatherTicker := time.NewTicker(c.weatherInterval)
+		defer weatherTicker.Stop()
+		weatherC = weatherTicker.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -128,6 +145,8 @@ func (c *Collector) Run(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			c.pollAllParks(ctx)
+		case <-weatherC:
+			c.pollAllWeather(ctx)
 		case <-refreshTicker.C:
 			if err := c.syncReferenceData(ctx); err != nil {
 				slog.Error("daily reference data refresh failed", "error", err)
@@ -152,6 +171,7 @@ func (c *Collector) syncReferenceData(ctx context.Context) error {
 	var destinations []store.Destination
 	var parks []store.Park
 	var parkIDs []string
+	parkToDest := make(map[string]string) // park ID -> destination ID (for weather centroids)
 
 	for _, d := range destResp.Destinations {
 		if !usDestinations[d.Slug] {
@@ -164,6 +184,7 @@ func (c *Collector) syncReferenceData(ctx context.Context) error {
 		})
 		for _, p := range d.Parks {
 			parkIDs = append(parkIDs, p.ID)
+			parkToDest[p.ID] = d.ID
 			// Timezone will be filled in when we fetch children
 			parks = append(parks, store.Park{
 				ID:            p.ID,
@@ -196,11 +217,16 @@ func (c *Collector) syncReferenceData(ctx context.Context) error {
 	}
 	slog.Info("synced parks", "count", len(parks))
 
-	// Fetch children for each park to get attractions and timezones
+	// Fetch children for each park to get attractions, timezones, and locations.
+	// latSum/lonSum/locCount accumulate this park's located attractions so a
+	// destination centroid (the weather fetch coordinate) can be computed.
 	type parkChildren struct {
 		parkID   string
 		timezone string
 		attrs    []store.Attraction
+		latSum   float64
+		lonSum   float64
+		locCount int
 	}
 
 	results := make(chan parkChildren, len(parkIDs))
@@ -217,6 +243,8 @@ func (c *Collector) syncReferenceData(ctx context.Context) error {
 			}
 
 			var attrs []store.Attraction
+			var latSum, lonSum float64
+			var locCount int
 			for _, child := range resp.Children {
 				if child.EntityType == "ATTRACTION" {
 					attrs = append(attrs, store.Attraction{
@@ -225,6 +253,11 @@ func (c *Collector) syncReferenceData(ctx context.Context) error {
 						Name:       child.Name,
 						ExternalID: child.ExternalID,
 					})
+					if child.Location != nil {
+						latSum += child.Location.Latitude
+						lonSum += child.Location.Longitude
+						locCount++
+					}
 				}
 			}
 
@@ -237,6 +270,9 @@ func (c *Collector) syncReferenceData(ctx context.Context) error {
 				parkID:   parkID,
 				timezone: tz,
 				attrs:    attrs,
+				latSum:   latSum,
+				lonSum:   lonSum,
+				locCount: locCount,
 			}
 		}(pid)
 	}
@@ -246,8 +282,15 @@ func (c *Collector) syncReferenceData(ctx context.Context) error {
 		close(results)
 	}()
 
+	// destCoord accumulates located-attraction coordinates per destination.
+	type destCoord struct {
+		latSum, lonSum float64
+		count          int
+	}
+
 	var totalAttractions int
 	var parkUpdates []store.Park
+	destCoords := make(map[string]*destCoord)
 	for pc := range results {
 		if len(pc.attrs) > 0 {
 			if err := c.store.UpsertAttractions(ctx, pc.attrs); err != nil {
@@ -261,12 +304,36 @@ func (c *Collector) syncReferenceData(ctx context.Context) error {
 			ID:       pc.parkID,
 			Timezone: pc.timezone,
 		})
+		// Accumulate this park's located attractions into its destination's centroid.
+		if pc.locCount > 0 {
+			if destID := parkToDest[pc.parkID]; destID != "" {
+				acc := destCoords[destID]
+				if acc == nil {
+					acc = &destCoord{}
+					destCoords[destID] = acc
+				}
+				acc.latSum += pc.latSum
+				acc.lonSum += pc.lonSum
+				acc.count += pc.locCount
+			}
+		}
 	}
 
 	// Update park timezones (do a targeted update since we only have id + timezone here)
 	for _, pu := range parkUpdates {
 		if err := c.store.UpdateParkTimezone(ctx, pu.ID, pu.Timezone); err != nil {
 			slog.Error("failed to update park timezone", "park_id", pu.ID, "error", err)
+		}
+	}
+
+	// Store each destination's weather centroid (mean of its attraction locations).
+	// Destinations with no located attractions keep NULL coords and are skipped by the
+	// weather poll (fail-safe).
+	for destID, acc := range destCoords {
+		lat := acc.latSum / float64(acc.count)
+		lon := acc.lonSum / float64(acc.count)
+		if err := c.store.UpdateDestinationCoordinates(ctx, destID, lat, lon); err != nil {
+			slog.Error("failed to update destination coordinates", "destination_id", destID, "error", err)
 		}
 	}
 
@@ -486,6 +553,190 @@ func (c *Collector) writeRawObservation(ctx context.Context, parkID, observation
 	return c.store.InsertRawObservation(ctx, store.RawObservation{
 		ObservationID: observationID,
 		SourceType:    "themeparks_wiki_live",
+		ObservedAt:    now,
+		ReceivedAt:    now,
+		Payload:       payload,
+		Metadata:      metaJSON,
+	})
+}
+
+// pollAllWeather fetches weather for every destination with coordinates and projects
+// it to that destination's parks. Runs on its own (slower) ticker; it feeds no Metric,
+// so it does NOT trigger Layer 2 processing.
+func (c *Collector) pollAllWeather(ctx context.Context) {
+	start := time.Now()
+
+	targets, err := c.store.GetWeatherTargets(ctx)
+	if err != nil {
+		slog.Error("failed to get weather targets", "error", err)
+		return
+	}
+	if len(targets) == 0 {
+		slog.Warn("no destinations have coordinates; skipping weather poll")
+		return
+	}
+
+	var (
+		wg          sync.WaitGroup
+		totalObs    atomic.Int64
+		errorCount  atomic.Int64
+		destsPolled atomic.Int64
+	)
+
+	for _, t := range targets {
+		wg.Add(1)
+		go func(target store.WeatherTarget) {
+			defer wg.Done()
+			n, err := c.pollDestinationWeather(ctx, target)
+			if err != nil {
+				slog.Error("failed to poll weather", "destination_id", target.DestinationID, "error", err)
+				errorCount.Add(1)
+				return
+			}
+			destsPolled.Add(1)
+			totalObs.Add(int64(n))
+		}(t)
+	}
+
+	wg.Wait()
+
+	slog.Info("weather poll complete",
+		"destinations_polled", destsPolled.Load(),
+		"observations_recorded", totalObs.Load(),
+		"errors", errorCount.Load(),
+		"duration", time.Since(start).Round(time.Millisecond),
+	)
+}
+
+// pollDestinationWeather fetches weather for one destination and projects it. Mirrors
+// pollPark: the raw response is persisted BEFORE projection and even on a failed fetch
+// (invariant I1). Current conditions become PIT-correct weather_observations; the next
+// ~6h of hourly forecast become bi-temporal weather_forecasts (issued_at = now). Every
+// projected row is written for each park in the destination. Returns the number of
+// current-conditions rows inserted.
+func (c *Collector) pollDestinationWeather(ctx context.Context, target store.WeatherTarget) (int, error) {
+	res, err := c.weather.FetchWithRaw(ctx, target.Lat, target.Lon)
+	now := time.Now().UTC()
+
+	// Persist raw before projection (I1). A failed fetch is recorded too (gap marker).
+	observationID := newUUID()
+	if werr := c.writeRawWeatherObservation(ctx, target, observationID, now, res, err); werr != nil {
+		slog.Error("failed to write raw weather observation", "destination_id", target.DestinationID, "error", werr)
+		observationID = "" // don't stamp a dangling lineage pointer
+	}
+
+	if err != nil {
+		return 0, err
+	}
+	resp := res.Response
+	if resp == nil {
+		return 0, nil
+	}
+
+	// Lineage pointer shared by every row projected from this poll's raw response.
+	var obsIDPtr *string
+	if observationID != "" {
+		obsIDPtr = &observationID
+	}
+
+	var observations []store.WeatherObservation
+	var forecasts []store.WeatherForecast
+
+	// Current conditions — stamped at the observation's valid time (PIT-correct).
+	if resp.Current != nil {
+		obsTime := time.Unix(resp.Current.Dt, 0).UTC()
+		for _, parkID := range target.ParkIDs {
+			observations = append(observations, store.WeatherObservation{
+				ParkID:              parkID,
+				Timestamp:           obsTime,
+				TempC:               resp.Current.Temp,
+				FeelsLikeC:          resp.Current.FeelsLike,
+				PrecipMM:            weather.PrecipMM(resp.Current.Rain, resp.Current.Snow),
+				Humidity:            resp.Current.Humidity,
+				WindSpeedMS:         resp.Current.WindSpeed,
+				CloudPct:            resp.Current.Clouds,
+				WeatherCode:         weather.CondCode(resp.Current.Weather),
+				WeatherMain:         weather.CondMain(resp.Current.Weather),
+				SourceObservationID: obsIDPtr,
+			})
+		}
+	}
+
+	// Forecast — hourly entries strictly in the future, up to +6h. issued_at = now is
+	// the PIT/as-of key; valid_at is the future time each entry describes.
+	horizonCap := now.Add(6 * time.Hour)
+	for _, h := range resp.Hourly {
+		validAt := time.Unix(h.Dt, 0).UTC()
+		if !validAt.After(now) || validAt.After(horizonCap) {
+			continue
+		}
+		horizonMin := int(validAt.Sub(now).Round(time.Minute) / time.Minute)
+		for _, parkID := range target.ParkIDs {
+			forecasts = append(forecasts, store.WeatherForecast{
+				ParkID:              parkID,
+				IssuedAt:            now,
+				ValidAt:             validAt,
+				HorizonMinutes:      horizonMin,
+				TempC:               h.Temp,
+				PrecipMM:            weather.PrecipMM(h.Rain, h.Snow),
+				PrecipProb:          h.Pop,
+				WeatherCode:         weather.CondCode(h.Weather),
+				WeatherMain:         weather.CondMain(h.Weather),
+				SourceObservationID: obsIDPtr,
+			})
+		}
+	}
+
+	insertedObs, err := c.store.InsertWeatherObservations(ctx, observations)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := c.store.InsertWeatherForecasts(ctx, forecasts); err != nil {
+		return insertedObs, err
+	}
+	return insertedObs, nil
+}
+
+// writeRawWeatherObservation persists the verbatim weather response (invariant I1),
+// mirroring writeRawObservation. res may be nil (transport error) and its body may be
+// non-JSON; both are handled so the jsonb payload only ever receives valid JSON.
+func (c *Collector) writeRawWeatherObservation(ctx context.Context, target store.WeatherTarget, observationID string, now time.Time, res *weather.Result, fetchErr error) error {
+	meta := map[string]any{
+		"destination_id": target.DestinationID,
+		"lat":            target.Lat,
+		"lon":            target.Lon,
+	}
+	var payload json.RawMessage
+
+	if res != nil {
+		meta["http_status"] = res.HTTPStatus
+		meta["latency_ms"] = res.LatencyMS
+		switch {
+		case len(res.Raw) == 0:
+			// nothing to store
+		case json.Valid(res.Raw):
+			payload = res.Raw
+		default:
+			// Non-JSON body: keep a bounded copy as a string so payload stays valid jsonb.
+			body := string(res.Raw)
+			if len(body) > 2000 {
+				body = body[:2000]
+			}
+			meta["raw_body"] = body
+		}
+	}
+	if fetchErr != nil {
+		meta["error"] = fetchErr.Error()
+	}
+
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("marshaling raw weather observation metadata: %w", err)
+	}
+
+	return c.store.InsertRawObservation(ctx, store.RawObservation{
+		ObservationID: observationID,
+		SourceType:    "openweather_onecall",
 		ObservedAt:    now,
 		ReceivedAt:    now,
 		Payload:       payload,

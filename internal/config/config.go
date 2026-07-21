@@ -12,15 +12,23 @@ type Config struct {
 	APIConcurrency int
 	APITimeout     time.Duration
 	LogLevel       string
+
+	// WeatherAPIKey enables the weather source when set (OpenWeatherMap One Call 3.0).
+	// Empty = weather polling disabled; existing deployments are unaffected.
+	WeatherAPIKey string
+	// WeatherPollInterval is the (slower) cadence for weather polling.
+	WeatherPollInterval time.Duration
 }
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		DatabaseURL:    os.Getenv("DATABASE_URL"),
-		PollInterval:   5 * time.Minute,
-		APIConcurrency: 15,
-		APITimeout:     10 * time.Second,
-		LogLevel:       "info",
+		DatabaseURL:         os.Getenv("DATABASE_URL"),
+		PollInterval:        5 * time.Minute,
+		APIConcurrency:      15,
+		APITimeout:          10 * time.Second,
+		LogLevel:            "info",
+		WeatherAPIKey:       os.Getenv("WEATHER_API_KEY"),
+		WeatherPollInterval: 30 * time.Minute,
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -53,6 +61,14 @@ func Load() (*Config, error) {
 
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		cfg.LogLevel = v
+	}
+
+	if v := os.Getenv("WEATHER_POLL_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid WEATHER_POLL_INTERVAL %q: %w", v, err)
+		}
+		cfg.WeatherPollInterval = d
 	}
 
 	return cfg, nil

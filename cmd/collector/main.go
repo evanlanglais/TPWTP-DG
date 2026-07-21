@@ -14,6 +14,7 @@ import (
 	"github.com/evanlanglais/tpwtp-dg/internal/collector"
 	"github.com/evanlanglais/tpwtp-dg/internal/config"
 	"github.com/evanlanglais/tpwtp-dg/internal/store"
+	"github.com/evanlanglais/tpwtp-dg/internal/weather"
 	"github.com/evanlanglais/tpwtp-dg/migrations"
 )
 
@@ -94,11 +95,20 @@ func main() {
 	// Initialize components
 	client := api.NewClient(cfg.APIConcurrency, cfg.APITimeout)
 	db := store.New(pool)
-	coll := collector.New(client, db, cfg.PollInterval)
+
+	// Weather is an opt-in second source: enabled only when an API key is configured.
+	var weatherClient *weather.Client
+	if cfg.WeatherAPIKey != "" {
+		weatherClient = weather.NewClient(cfg.WeatherAPIKey, cfg.APIConcurrency, cfg.APITimeout)
+	}
+
+	coll := collector.New(client, weatherClient, db, cfg.PollInterval, cfg.WeatherPollInterval)
 
 	slog.Info("starting collector",
 		"poll_interval", cfg.PollInterval,
 		"api_concurrency", cfg.APIConcurrency,
+		"weather_enabled", weatherClient != nil,
+		"weather_poll_interval", cfg.WeatherPollInterval,
 	)
 
 	if err := coll.Run(ctx); err != nil {

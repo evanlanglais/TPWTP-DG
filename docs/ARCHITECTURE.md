@@ -62,11 +62,17 @@ classification.
 
 ## 4. Scope
 
-- **Source:** the [themeparks.wiki REST API](https://api.themeparks.wiki/v1) only.
+- **Sources:**
+  - [themeparks.wiki REST API](https://api.themeparks.wiki/v1) — wait times (always on).
+  - [OpenWeatherMap One Call 3.0](https://openweathermap.org/api/one-call-3) — weather,
+    **opt-in**: polled only when `WEATHER_API_KEY` is set, so existing deployments are
+    unaffected. It is the second source the §9 seam anticipated. See §6.
 - **Coverage:** US parks only. The set is a hardcoded allowlist of destination slugs in
   `internal/collector/collector.go` (`usDestinations`). Anything not on the list is skipped on
   sync and pruned from the DB if previously stored.
-- **Cadence:** every 5 minutes (`POLL_INTERVAL`).
+- **Cadence:** wait times every 5 minutes (`POLL_INTERVAL`); weather on its own slower ticker
+  (`WEATHER_POLL_INTERVAL`, default 30 min) because forecasts refresh ~hourly and its free-tier
+  call budget is finite.
 
 ---
 
@@ -121,11 +127,12 @@ matters is what each table is *for*.
 
 ### The raw record — `raw_observations`
 The replayable substrate (I1). One row per source fetch: `source_type`, `observed_at`,
-`received_at`, `payload` (the verbatim JSON body), `metadata` (park_id, http status, latency, and
-on a failed fetch the error / non-JSON body). Range-partitioned by month on `received_at`,
-partitions created lazily in Go. `source_type` is a plain column today (one source); a source
-registry is the seam for when a second source is added (§9). Because each `/live` response also
-self-identifies its park inside `payload`, identity is queryable even without a dedicated column.
+`received_at`, `payload` (the verbatim JSON body), `metadata` (park_id or destination_id, http
+status, latency, and on a failed fetch the error / non-JSON body). Range-partitioned by month on
+`received_at`, partitions created lazily in Go. `source_type` now discriminates two sources
+(`themeparks_wiki_live`, `openweather_onecall`) writing through this one path; a source-registry
+table remains the seam if a third is added (§9). Each response self-identifies its subject inside
+`payload` (a `/live` response its park, a weather response its coordinate).
 
 ### The projected record — `wait_times`
 The load-bearing time series for inspection. One row per `(attraction_id, timestamp)`; columns:
@@ -139,10 +146,28 @@ Two properties to know before querying it:
 - **Closed-ride rows are sparse** (a consequence of dedup): reconstruct downtime from
   `l2_status_transitions`, not from row presence.
 
+### The weather record — `weather_observations` / `weather_forecasts`
+The second source's projection. Weather is fetched **once per destination** (a resort's parks are
+within a few km and share weather) at the destination centroid, then projected to each of that
+destination's parks — so both tables stay park-keyed like `wait_times` for a trivial ML join.
+Both carry a `source_observation_id` back to the one `raw_observations` row per destination per
+poll. Range-partitioned by month, partitions created lazily in Go.
+- **`weather_observations`** — current conditions (temp, feels-like, precip mm, humidity, wind,
+  cloud, condition code/name), stamped at the observation's valid `timestamp`. **PIT-correct**
+  (§11): value at `T` uses only data ≤ `T`. Serves `temp_f`, `precip_mm_now`, "currently raining".
+- **`weather_forecasts`** — **bi-temporal**. Each row carries `issued_at` (when the forecast
+  became knowable = our fetch time, the as-of key) and `valid_at` (the future time it describes),
+  plus `horizon_minutes` and `precip_prob`. The projection stores the next ~6 h of hourly forecast
+  each poll; the raw body keeps the full response. **PIT-correct only when read as-of `issued_at`**
+  (§11); partitioned on `issued_at`.
+
 ### Reference & schedule
-`destinations`, `parks` (carries `timezone`), `attractions` (`external_id`) — upserted on sync,
-pruned to the US allowlist. `park_schedules` holds open/close windows and drives the park-closed
-filter. That filter **fails open**: a park with no cached schedule is treated as always open.
+`destinations` (now also carries a weather `latitude`/`longitude` centroid, computed from its
+attraction locations on sync), `parks` (carries `timezone`), `attractions` (`external_id`) —
+upserted on sync, pruned to the US allowlist. `park_schedules` holds open/close windows and drives
+the park-closed filter. That filter **fails open**: a park with no cached schedule is treated as
+always open. Likewise a destination with no located attractions keeps NULL coords and is simply
+skipped by the weather poll.
 
 ### Derived analytics
 Computed after each poll from `wait_times` (§7). Every one is read by the frontend today (all
@@ -214,7 +239,9 @@ The seams the current design already has — stated as seams, not roadmaps:
 - **A new derived output** = implement `Metric` (including its `Temporal()` contract) and add a
   migration for its table. The engine handles scheduling, backfill, and versioning for free.
 - **A new source** = a new `source_type` in `raw_observations` writing through the same raw path;
-  a source-registry table is the point at which that would be formalized.
+  a source-registry table is the point at which that would be formalized. *Now exercised:* the
+  weather source (`openweather_onecall`, §6) is a sibling poll on its own ticker, reusing the raw
+  path unchanged and projecting into its own park-keyed tables.
 - **More parks** = add slugs to the allowlist.
 - **Growth over time** = monthly partitioning on the two record tables is the scaling seam.
 
@@ -244,7 +271,16 @@ The per-output temporal contract, mirrored by each metric's `Temporal()` and enf
 convention:
 
 - **PIT-correct (safe as an at-`t` feature, shared by both readers):** `l2_wait_velocity`,
-  `l2_status_transitions`, `l3_park_crowd_pressure`, `l3_correlation_pairs`.
+  `l2_status_transitions`, `l3_park_crowd_pressure`, `l3_correlation_pairs`, `weather_observations`.
+  - `weather_observations` is a raw-source projection (like `wait_times`, not a `Metric`): it is
+    stamped at the observation's valid `timestamp`, so its value uses only data ≤ that time.
+- **Conditionally PIT-correct — depends on the read key:**
+  - `weather_forecasts` — **safe as an at-`t` feature only when read as-of `issued_at`** (the time
+    the forecast became knowable), *never* `valid_at`. A forecast for `t+60` is legal at `t`
+    *because* it was issued at `issued_at ≤ t`. Keying an as-of join on `valid_at` instead is the
+    same trap as `l3_transition_impact` below (stamped at one time, value from another). A forecast
+    row is **never overwritten with the later actual** — the two must coexist; the actual at a
+    forecast's `valid_at` is future-dependent (a label) and belongs to the ML component (§2).
 - **Inspection-only (not safe as an at-`t` feature):**
   - `l3_transition_impact` — its row is stamped at `transition_time` but is computed from a
     snapshot at `event + 30min` (`crowd_flow.go`); safe only when read with a **≥30 min lag**.
