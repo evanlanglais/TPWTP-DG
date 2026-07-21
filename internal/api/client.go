@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -95,6 +96,61 @@ func (c *Client) GetEntityLive(ctx context.Context, entityID string) (*EntityLiv
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// LiveResult carries the decoded live response plus the verbatim response body
+// and delivery metadata needed to persist a raw_observations row (invariant I1).
+type LiveResult struct {
+	Response   *EntityLiveResponse // nil on non-200 or parse error
+	Raw        json.RawMessage     // verbatim response body
+	HTTPStatus int
+	LatencyMS  int64
+}
+
+// GetEntityLiveWithRaw fetches live data and returns the verbatim body alongside
+// the decoded response. Unlike GetEntityLive it does NOT discard the bytes, so the
+// caller can persist them for full replayability. It returns a non-nil *LiveResult
+// even on non-200 or parse error (with Response == nil) so the caller can record a
+// failed-fetch observation as a signal.
+func (c *Client) GetEntityLiveWithRaw(ctx context.Context, entityID string) (*LiveResult, error) {
+	if err := c.acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer c.release()
+
+	path := "/entity/" + entityID + "/live"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request for %s: %w", path, err)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	start := time.Now()
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetching %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+
+	body, readErr := io.ReadAll(resp.Body)
+	res := &LiveResult{
+		Raw:        json.RawMessage(body),
+		HTTPStatus: resp.StatusCode,
+		LatencyMS:  time.Since(start).Milliseconds(),
+	}
+	if readErr != nil {
+		return res, fmt.Errorf("reading response from %s: %w", path, readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return res, fmt.Errorf("unexpected status %d for %s", resp.StatusCode, path)
+	}
+
+	var decoded EntityLiveResponse
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return res, fmt.Errorf("decoding response from %s: %w", path, err)
+	}
+	res.Response = &decoded
+	return res, nil
 }
 
 // GetEntitySchedule returns schedule data for the given entity (typically a park).

@@ -4,7 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-TPWTP-DG (Theme Park Wait Time Predictor - Data Gatherer) is a Go service that polls the [themeparks.wiki REST API](https://api.themeparks.wiki/v1) every 5 minutes to collect real-time ride wait times from all theme parks worldwide, storing them in PostgreSQL.
+TPWTP-DG (Theme Park Wait Time Predictor - Data Gatherer) is a Go service that polls the [themeparks.wiki REST API](https://api.themeparks.wiki/v1) every 5 minutes to collect ride wait times from a US-park allowlist, storing them in PostgreSQL.
+
+Its mandate is to keep a durable record that two readers leverage from the **same** data: **inspection** (an existing API service / frontend reading "now" = the latest row) and a **future ML predictor** (reading the same rows as-of past time `t` for training). Two invariants make that possible and must not be eroded by new features:
+
+- **I1 — Full replayability:** every source response is persisted verbatim to `raw_observations` *before* projection into `wait_times` (raw is never the thing discarded).
+- **I2 — Point-in-time correctness:** every derived output is either PIT-correct (value at `T` uses only data ≤ `T`, safe as an at-`t` feature) or explicitly inspection-only. Each `Metric` declares this via `Temporal()`.
+
+`docs/ARCHITECTURE.md` is the canonical design doc (domain of ownership, invariants, PIT classification); read it before changing the pipeline's shape.
 
 ## Commands
 
@@ -21,11 +28,12 @@ There are no test scripts configured yet.
 ### Data Flow
 
 1. On startup, the collector syncs reference data: fetches all destinations and parks from `GET /v1/destinations`, then fetches children for each park from `GET /v1/entity/{id}/children` to populate attractions
-2. Every 5 minutes (configurable via `POLL_INTERVAL`), it fans out `GET /v1/entity/{parkId}/live` for all parks using a bounded worker pool
-3. Live data is filtered to `entityType == "ATTRACTION"` and bulk-inserted into the `wait_times` table (Layer 1)
-4. New attractions discovered during live polling are auto-upserted
-5. After each poll, Layer 2 processing runs: computes velocity/trends and detects status transitions from the raw data
-6. Materialized views for daily stats are refreshed hourly
+2. Every 5 minutes (configurable via `POLL_INTERVAL`), it fans out `GET /v1/entity/{parkId}/live` for all parks — one goroutine per park, bounded only by the API semaphore (`API_CONCURRENCY`), not a worker pool
+3. Each `/live` response is written verbatim to `raw_observations` (I1) **before** projection
+4. Live data is filtered to `entityType == "ATTRACTION"` and bulk-inserted into the `wait_times` table, each row carrying a `source_observation_id` lineage pointer
+5. New attractions discovered during live polling are auto-upserted
+6. After each poll, derived processing runs (velocity/trends, transitions, and park-level metrics); each metric declares a PIT contract via `Temporal()`
+7. Materialized views for daily stats are refreshed hourly
 
 ### Key Packages
 
@@ -39,18 +47,23 @@ There are no test scripts configured yet.
 
 ### Database Schema (PostgreSQL)
 
+- **`raw_observations`** — Verbatim source responses (I1): source_type, observed_at, received_at, payload (jsonb), metadata; partitioned by month on received_at
 - **`destinations`** — Theme park resort groups (id, name, slug)
 - **`parks`** — Individual parks (id, destination_id, name, timezone)
 - **`attractions`** — Rides/attractions (id, park_id, name, external_id)
-- **`wait_times`** — Time-series data, partitioned by month (attraction_id, timestamp, status, standby_wait, etc.)
+- **`wait_times`** — Projected time-series data, partitioned by month (attraction_id, timestamp, status, standby_wait, …, source_observation_id lineage)
 
-#### Layer 2 (Derived — `l2_` prefix)
+#### Derived (`l2_`/`l3_` prefixes are historical names, not structural layers)
 
-- **`l2_wait_velocity`** — Per-attraction velocity, EMA, and trend per poll tick (partitioned by month)
-- **`l2_status_transitions`** — Records when rides change status (OPERATING→DOWN, etc.) with duration
-- **`l2_daily_attraction_stats`** — Materialized view: min/max/avg/median/p90 wait per attraction per day
-- **`l2_daily_park_stats`** — Materialized view: park-level daily aggregates
-- **`l2_processing_cursors`** — Tracks last-processed timestamp per metric for incremental processing
+- **`l2_wait_velocity`** — Per-attraction velocity, EMA, and trend per poll tick (PIT-correct)
+- **`l2_status_transitions`** — Records when rides change status (OPERATING→DOWN, etc.) with duration (PIT-correct)
+- **`l3_park_crowd_pressure`** — Park-level wait-weighted velocity EMA (PIT-correct)
+- **`l3_correlation_pairs`** — Pairwise Pearson r between rides' velocity series over a trailing window (PIT-correct)
+- **`l3_transition_impact`** — Closure/opening crowd redistribution; **inspection-only** (embeds event+30min, ≥30min lag to use as a feature)
+- **`l2_daily_attraction_stats` / `l2_daily_park_stats`** — Materialized views of daily aggregates; **inspection-only** (all-history)
+- **`l2_processing_cursors`** — Tracks last-processed timestamp + logic_version per metric for incremental processing
+
+See `docs/ARCHITECTURE.md` §11 for the point-in-time classification.
 
 ### Configuration
 

@@ -8,7 +8,21 @@ import (
 	"github.com/evanlanglais/tpwtp-dg/internal/store"
 )
 
-// Metric is the interface that all Layer 2 metrics must implement.
+// TemporalContract declares whether a metric's output is safe to read as an
+// at-t feature (invariant I2, point-in-time correctness — see docs/ARCHITECTURE.md §11).
+//
+// PointInTime=true means the value stamped at timestamp T is computed from data
+// at-or-before T only, so it can be read as-of T without leaking the future.
+// When PointInTime=false the output is inspection-only; SafeLag is the minimum
+// age a row must have before it may be treated as an at-t feature (0 = never), and
+// Note explains why.
+type TemporalContract struct {
+	PointInTime bool
+	SafeLag     time.Duration
+	Note        string
+}
+
+// Metric is the interface that all derived-data metrics must implement.
 type Metric interface {
 	// Name returns the unique identifier for this metric (used as cursor key).
 	Name() string
@@ -17,6 +31,8 @@ type Metric interface {
 	Version() int
 	// OutputTables returns the table names this metric writes to.
 	OutputTables() []string
+	// Temporal declares this metric's point-in-time contract (I2).
+	Temporal() TemporalContract
 	// Process computes the metric for data between since and now.
 	Process(ctx context.Context, since time.Time, now time.Time) error
 }
@@ -43,6 +59,17 @@ func New(s *store.Store) *Processor {
 		NewCrowdPressureMetric(s),
 		NewCorrelationMetric(s),
 		NewCrowdFlowMetric(s),
+	}
+	// Surface each metric's point-in-time contract (I2) at startup so the
+	// PIT classification is visible in logs rather than folklore.
+	for _, m := range p.metrics {
+		tc := m.Temporal()
+		slog.Info("metric temporal contract",
+			"metric", m.Name(),
+			"point_in_time", tc.PointInTime,
+			"safe_lag", tc.SafeLag,
+			"note", tc.Note,
+		)
 	}
 	return p
 }

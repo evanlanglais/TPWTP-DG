@@ -38,6 +38,10 @@ func (c *CorrelationMetric) Name() string           { return "correlation" }
 func (c *CorrelationMetric) Version() int            { return 3 }
 func (c *CorrelationMetric) OutputTables() []string   { return []string{"l3_correlation_pairs"} }
 
+// Temporal: each pair is stamped at computed_at over a trailing 2h window, so
+// it uses only data <= computed_at.
+func (c *CorrelationMetric) Temporal() TemporalContract { return TemporalContract{PointInTime: true} }
+
 func (c *CorrelationMetric) Process(ctx context.Context, since, now time.Time) error {
 	// Only compute on hour boundaries
 	currentHour := now.Truncate(time.Hour).Hour()

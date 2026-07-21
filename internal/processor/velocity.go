@@ -36,6 +36,9 @@ func (v *VelocityMetric) Name() string           { return "velocity" }
 func (v *VelocityMetric) Version() int            { return 3 }
 func (v *VelocityMetric) OutputTables() []string   { return []string{"l2_wait_velocity"} }
 
+// Temporal: velocity[t] = wait[t] - wait[t-1] and its EMA use only data <= t.
+func (v *VelocityMetric) Temporal() TemporalContract { return TemporalContract{PointInTime: true} }
+
 func (v *VelocityMetric) Process(ctx context.Context, since, now time.Time) error {
 	deltas, err := v.store.GetRecentWaitTimeDeltas(ctx, since, now)
 	if err != nil {

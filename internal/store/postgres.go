@@ -44,6 +44,9 @@ type WaitTime struct {
 	ReturnTimeState *string
 	ReturnTimeStart *time.Time
 	ReturnTimeEnd   *time.Time
+	// SourceObservationID links this projected row back to the raw_observations
+	// row it came from (invariant I1). Nil for rows written before lineage existed.
+	SourceObservationID *string
 }
 
 // Store wraps a pgx connection pool and provides data access methods.
@@ -152,6 +155,7 @@ func (s *Store) InsertWaitTimes(ctx context.Context, wts []WaitTime) (int, error
 			wt.ReturnTimeState,
 			wt.ReturnTimeStart,
 			wt.ReturnTimeEnd,
+			wt.SourceObservationID,
 		}
 	}
 
@@ -161,6 +165,7 @@ func (s *Store) InsertWaitTimes(ctx context.Context, wts []WaitTime) (int, error
 			"attraction_id", "timestamp", "status",
 			"standby_wait", "single_rider_wait",
 			"return_time_state", "return_time_start", "return_time_end",
+			"source_observation_id",
 		},
 		pgx.CopyFromRows(rows),
 	)
@@ -300,4 +305,33 @@ func (s *Store) GetKnownAttractionIDs(ctx context.Context, parkID string) (map[s
 		ids[id] = true
 	}
 	return ids, rows.Err()
+}
+
+// ReadWaitTimesWindow returns raw wait_times rows in (since, until], ordered by
+// timestamp. Read-only; used by the legacy backfill to adopt historical rows into
+// raw_observations without modifying the originals.
+func (s *Store) ReadWaitTimesWindow(ctx context.Context, since, until time.Time) ([]WaitTime, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT attraction_id, timestamp, status, standby_wait, single_rider_wait,
+		       return_time_state, return_time_start, return_time_end
+		FROM wait_times
+		WHERE timestamp > $1 AND timestamp <= $2
+		ORDER BY timestamp
+	`, since, until)
+	if err != nil {
+		return nil, fmt.Errorf("querying wait_times window: %w", err)
+	}
+	defer rows.Close()
+
+	var out []WaitTime
+	for rows.Next() {
+		var wt WaitTime
+		if err := rows.Scan(&wt.AttractionID, &wt.Timestamp, &wt.Status,
+			&wt.StandbyWait, &wt.SingleRiderWait,
+			&wt.ReturnTimeState, &wt.ReturnTimeStart, &wt.ReturnTimeEnd); err != nil {
+			return nil, fmt.Errorf("scanning wait_time: %w", err)
+		}
+		out = append(out, wt)
+	}
+	return out, rows.Err()
 }

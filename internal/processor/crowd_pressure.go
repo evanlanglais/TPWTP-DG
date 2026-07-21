@@ -27,6 +27,10 @@ func (c *CrowdPressureMetric) Name() string           { return "crowd_pressure" 
 func (c *CrowdPressureMetric) Version() int            { return 3 }
 func (c *CrowdPressureMetric) OutputTables() []string   { return []string{"l3_park_crowd_pressure"} }
 
+// Temporal: each (park, timestamp) score aggregates velocity EMAs observed at
+// that timestamp; its own EMA is causal, so it uses only data <= t.
+func (c *CrowdPressureMetric) Temporal() TemporalContract { return TemporalContract{PointInTime: true} }
+
 func (c *CrowdPressureMetric) Process(ctx context.Context, since, now time.Time) error {
 	snapshots, err := c.store.GetParkVelocitySnapshots(ctx, since, now)
 	if err != nil {

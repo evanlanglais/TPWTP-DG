@@ -51,6 +51,17 @@ func (f *CrowdFlowMetric) Name() string           { return "crowd_flow" }
 func (f *CrowdFlowMetric) Version() int            { return 3 }
 func (f *CrowdFlowMetric) OutputTables() []string   { return []string{"l3_transition_impact"} }
 
+// Temporal: an impact row is stamped at transition_time but computed from a
+// snapshot at event+30min, so it is NOT point-in-time correct. Inspection-only;
+// safe as an at-t feature only when read with a >=30min lag.
+func (f *CrowdFlowMetric) Temporal() TemporalContract {
+	return TemporalContract{
+		PointInTime: false,
+		SafeLag:     crowdFlowLag,
+		Note:        "row stamped at transition_time embeds event+30min; lag >=30min before use as a feature",
+	}
+}
+
 func (f *CrowdFlowMetric) Process(ctx context.Context, since, now time.Time) error {
 	// Shift the query window back by the lag so cursor advancement doesn't
 	// create gaps. The cursor advances to `now`, so the next chunk will query

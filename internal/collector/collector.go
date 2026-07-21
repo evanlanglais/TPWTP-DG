@@ -2,6 +2,9 @@ package collector
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -326,12 +329,21 @@ func (c *Collector) pollAllParks(ctx context.Context) {
 // pollPark fetches live data for a single park and inserts wait times.
 // Returns the number of wait time records inserted.
 func (c *Collector) pollPark(ctx context.Context, parkID string) (int, error) {
-	resp, err := c.client.GetEntityLive(ctx, parkID)
+	res, err := c.client.GetEntityLiveWithRaw(ctx, parkID)
+	now := time.Now().UTC()
+
+	// Persist the raw response before projection (invariant I1). A failed fetch is
+	// recorded too — an absent-payload row marks a gap in the series.
+	observationID := newUUID()
+	if werr := c.writeRawObservation(ctx, parkID, observationID, now, res, err); werr != nil {
+		slog.Error("failed to write raw observation", "park_id", parkID, "error", werr)
+		observationID = "" // don't stamp a dangling lineage pointer
+	}
+
 	if err != nil {
 		return 0, err
 	}
-
-	now := time.Now().UTC()
+	resp := res.Response
 
 	// Get known attractions to detect new ones
 	knownAttrs, err := c.store.GetKnownAttractionIDs(ctx, parkID)
@@ -342,6 +354,12 @@ func (c *Collector) pollPark(ctx context.Context, parkID string) (int, error) {
 
 	var waitTimes []store.WaitTime
 	var newAttrs []store.Attraction
+
+	// Lineage pointer shared by every row projected from this poll's raw response.
+	var obsIDPtr *string
+	if observationID != "" {
+		obsIDPtr = &observationID
+	}
 
 	for _, entity := range resp.LiveData {
 		if entity.EntityType != "ATTRACTION" {
@@ -359,9 +377,10 @@ func (c *Collector) pollPark(ctx context.Context, parkID string) (int, error) {
 		}
 
 		wt := store.WaitTime{
-			AttractionID: entity.ID,
-			Timestamp:    now,
-			Status:       entity.Status,
+			AttractionID:        entity.ID,
+			Timestamp:           now,
+			Status:              entity.Status,
+			SourceObservationID: obsIDPtr,
 		}
 
 		if entity.Queue != nil {
@@ -426,4 +445,59 @@ func (c *Collector) pollPark(ctx context.Context, parkID string) (int, error) {
 		return 0, err
 	}
 	return inserted, nil
+}
+
+// writeRawObservation persists the verbatim source response (invariant I1). res may
+// be nil (transport error) and its body may be non-JSON (an error page); both cases
+// are handled so the jsonb payload only ever receives valid JSON.
+func (c *Collector) writeRawObservation(ctx context.Context, parkID, observationID string, now time.Time, res *api.LiveResult, fetchErr error) error {
+	meta := map[string]any{"park_id": parkID}
+	var payload json.RawMessage
+
+	if res != nil {
+		meta["http_status"] = res.HTTPStatus
+		meta["latency_ms"] = res.LatencyMS
+		switch {
+		case len(res.Raw) == 0:
+			// nothing to store
+		case json.Valid(res.Raw):
+			payload = res.Raw
+			if res.Response != nil {
+				meta["entity_count"] = len(res.Response.LiveData)
+			}
+		default:
+			// Non-JSON body: keep a bounded copy as a string so payload stays valid jsonb.
+			body := string(res.Raw)
+			if len(body) > 2000 {
+				body = body[:2000]
+			}
+			meta["raw_body"] = body
+		}
+	}
+	if fetchErr != nil {
+		meta["error"] = fetchErr.Error()
+	}
+
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("marshaling raw observation metadata: %w", err)
+	}
+
+	return c.store.InsertRawObservation(ctx, store.RawObservation{
+		ObservationID: observationID,
+		SourceType:    "themeparks_wiki_live",
+		ObservedAt:    now,
+		ReceivedAt:    now,
+		Payload:       payload,
+		Metadata:      metaJSON,
+	})
+}
+
+// newUUID returns a random RFC-4122 v4 UUID string (crypto/rand; no dependency).
+func newUUID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
