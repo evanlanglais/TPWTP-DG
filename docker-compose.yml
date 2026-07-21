@@ -9,6 +9,19 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
     restart: unless-stopped
 
+  # One-off legacy backfill: adopts historical wait_times into raw_observations.
+  # Does not auto-start (guarded by a profile). Run it explicitly with:
+  #   docker compose run --rm backfill
+  # Read-only on wait_times, idempotent, and resumable — safe to re-run.
+  backfill:
+    build: .
+    entrypoint: ["/backfill"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    profiles: ["backfill"]
+    restart: "no"
+
 networks:
   default:
     enable_ipv6: true
