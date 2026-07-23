@@ -13,9 +13,14 @@ import (
 
 const baseURL = "https://api.openweathermap.org/data/3.0/onecall"
 
-// Client is a rate-limited HTTP client for the OpenWeatherMap One Call 3.0 API.
+// Client is a rate-limited HTTP client for the OpenWeatherMap One Call API 3.0.
 // It mirrors internal/api.Client (buffered-channel semaphore + per-request timeout)
 // but targets a different host and carries the API key.
+//
+// One Call 3.0 returns current conditions and the hourly forecast in a single call, so
+// a weather poll for a location is one request. It requires the "One Call by Call"
+// subscription (first 1,000 calls/day free); size the poll interval to your resolved
+// fetch-location count — see docs/ARCHITECTURE.md §4.
 type Client struct {
 	http   *http.Client
 	sem    chan struct{}

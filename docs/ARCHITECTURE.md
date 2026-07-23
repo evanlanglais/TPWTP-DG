@@ -69,10 +69,16 @@ classification.
     unaffected. It is the second source the §9 seam anticipated. See §6.
 - **Coverage:** US parks only. The set is a hardcoded allowlist of destination slugs in
   `internal/collector/collector.go` (`usDestinations`). Anything not on the list is skipped on
-  sync and pruned from the DB if previously stored.
+  sync and pruned from the DB if previously stored. (The allowlist must track themeparks.wiki's
+  current slugs; a stale slug drops the destination *and* lets the prune delete its history.)
 - **Cadence:** wait times every 5 minutes (`POLL_INTERVAL`); weather on its own slower ticker
-  (`WEATHER_POLL_INTERVAL`, default 30 min) because forecasts refresh ~hourly and its free-tier
-  call budget is finite.
+  (`WEATHER_POLL_INTERVAL`, default 60 min) because forecasts refresh ~hourly.
+- **Weather call budget.** One Call 3.0 returns current + hourly forecast in **one** call, so a
+  weather fetch is one request per *cluster* (co-located parks are grouped at ~2 km — OWM's grid
+  resolution — so only spread-out resorts like WDW and Universal Orlando split; see §6). It needs
+  the "One Call by Call" subscription (first **1,000 calls/day** free, then pay-as-you-go). Daily
+  calls ≈ `clusters × (1440 / interval_minutes)` — size `WEATHER_POLL_INTERVAL` to the
+  `clusters_polled` count the weather poll logs; at 60 min ~47 clusters is roughly the free tier.
 
 ---
 
@@ -129,10 +135,11 @@ matters is what each table is *for*.
 The replayable substrate (I1). One row per source fetch: `source_type`, `observed_at`,
 `received_at`, `payload` (the verbatim JSON body), `metadata` (park_id or destination_id, http
 status, latency, and on a failed fetch the error / non-JSON body). Range-partitioned by month on
-`received_at`, partitions created lazily in Go. `source_type` now discriminates two sources
-(`themeparks_wiki_live`, `openweather_onecall`) writing through this one path; a source-registry
-table remains the seam if a third is added (§9). Each response self-identifies its subject inside
-`payload` (a `/live` response its park, a weather response its coordinate).
+`received_at`, partitions created lazily in Go. `source_type` now discriminates the two sources —
+`themeparks_wiki_live` for wait times and `openweather_onecall` for weather — both writing through
+this one path; a source-registry table remains the seam if the set grows further (§9). Each
+response self-identifies its subject inside `payload` (a `/live` response its park, a weather
+response its coordinate).
 
 ### The projected record — `wait_times`
 The load-bearing time series for inspection. One row per `(attraction_id, timestamp)`; columns:
@@ -147,11 +154,13 @@ Two properties to know before querying it:
   `l2_status_transitions`, not from row presence.
 
 ### The weather record — `weather_observations` / `weather_forecasts`
-The second source's projection. Weather is fetched **once per destination** (a resort's parks are
-within a few km and share weather) at the destination centroid, then projected to each of that
-destination's parks — so both tables stay park-keyed like `wait_times` for a trivial ML join.
-Both carry a `source_observation_id` back to the one `raw_observations` row per destination per
-poll. Range-partitioned by month, partitions created lazily in Go.
+The second source's projection. Parks are clustered into fetch locations at ~2 km (OWM's grid
+resolution, `clusterParks` in `collector.go`): co-located parks share one One Call 3.0 fetch,
+spread-out resorts (WDW, Universal Orlando) split. The one reading is projected to **every park in
+the cluster**, so both tables stay park-keyed like `wait_times` for a trivial ML join. One Call 3.0
+returns current + hourly in a single call, so both tables' rows carry the same
+`source_observation_id` back to that one raw row. Range-partitioned by month, partitions created
+lazily in Go.
 - **`weather_observations`** — current conditions (temp, feels-like, precip mm, humidity, wind,
   cloud, condition code/name), stamped at the observation's valid `timestamp`. **PIT-correct**
   (§11): value at `T` uses only data ≤ `T`. Serves `temp_f`, `precip_mm_now`, "currently raining".
@@ -162,12 +171,11 @@ poll. Range-partitioned by month, partitions created lazily in Go.
   (§11); partitioned on `issued_at`.
 
 ### Reference & schedule
-`destinations` (now also carries a weather `latitude`/`longitude` centroid, computed from its
-attraction locations on sync), `parks` (carries `timezone`), `attractions` (`external_id`) —
-upserted on sync, pruned to the US allowlist. `park_schedules` holds open/close windows and drives
-the park-closed filter. That filter **fails open**: a park with no cached schedule is treated as
-always open. Likewise a destination with no located attractions keeps NULL coords and is simply
-skipped by the weather poll.
+`destinations`, `parks` (carries `timezone` and a weather `latitude`/`longitude` centroid computed
+from its attraction locations on sync), `attractions` (`external_id`) — upserted on sync, pruned to
+the US allowlist. `park_schedules` holds open/close windows and drives the park-closed filter. That
+filter **fails open**: a park with no cached schedule is treated as always open. Likewise a park
+with no located attractions keeps NULL coords and is simply skipped by the weather poll.
 
 ### Derived analytics
 Computed after each poll from `wait_times` (§7). Every one is read by the frontend today (all

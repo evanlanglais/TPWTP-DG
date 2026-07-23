@@ -27,20 +27,20 @@ There are no test scripts configured yet.
 
 ### Data Flow
 
-1. On startup, the collector syncs reference data: fetches all destinations and parks from `GET /v1/destinations`, then fetches children for each park from `GET /v1/entity/{id}/children` to populate attractions (and, from the children's locations, computes each destination's weather centroid)
+1. On startup, the collector syncs reference data: fetches all destinations and parks from `GET /v1/destinations`, then fetches children for each park from `GET /v1/entity/{id}/children` to populate attractions (and, from the children's locations, computes each park's weather centroid)
 2. Every 5 minutes (configurable via `POLL_INTERVAL`), it fans out `GET /v1/entity/{parkId}/live` for all parks — one goroutine per park, bounded only by the API semaphore (`API_CONCURRENCY`), not a worker pool
 3. Each `/live` response is written verbatim to `raw_observations` (I1) **before** projection
 4. Live data is filtered to `entityType == "ATTRACTION"` and bulk-inserted into the `wait_times` table, each row carrying a `source_observation_id` lineage pointer
 5. New attractions discovered during live polling are auto-upserted
 6. After each poll, derived processing runs (velocity/trends, transitions, and park-level metrics); each metric declares a PIT contract via `Temporal()`
 7. Materialized views for daily stats are refreshed hourly
-8. **If `WEATHER_API_KEY` is set**, a sibling weather poll runs on its own ticker (`WEATHER_POLL_INTERVAL`): one OpenWeatherMap fetch per destination centroid → written verbatim to `raw_observations` (I1, `source_type=openweather_onecall`) **before** projection → current conditions into `weather_observations` and the next ~6h hourly forecast into `weather_forecasts`, projected to each park in the destination. It feeds no `Metric`, so it does not trigger Layer 2.
+8. **If `WEATHER_API_KEY` is set**, a sibling weather poll runs on its own ticker (`WEATHER_POLL_INTERVAL`): parks are clustered by ~2km, and per cluster one OpenWeatherMap One Call 3.0 call (current + hourly forecast together) is written verbatim to `raw_observations` (I1, `source_type=openweather_onecall`) **before** projection → current conditions into `weather_observations` and the next ~6h hourly forecast into `weather_forecasts`, projected to each park in the cluster. It feeds no `Metric`, so it does not trigger Layer 2.
 
 ### Key Packages
 
 - **`cmd/collector/main.go`** — Entry point, config loading, signal handling, graceful shutdown
 - **`internal/api/`** — HTTP client for themeparks.wiki (semaphore-based concurrency limiting) and Go struct types matching API responses
-- **`internal/weather/`** — HTTP client + types for the OpenWeatherMap One Call 3.0 source (mirrors `internal/api`'s raw-carrier shape for I1); opt-in via `WEATHER_API_KEY`
+- **`internal/weather/`** — HTTP client + types for the OpenWeatherMap One Call 3.0 source (single call returns current + hourly forecast; mirrors `internal/api`'s raw-carrier shape for I1); opt-in via `WEATHER_API_KEY`
 - **`internal/collector/`** — Poll orchestrator: startup sync, ticker loop, worker pool, fan-out/fan-in, triggers Layer 2 processing
 - **`internal/processor/`** — Layer 2 derived data: Metric interface, velocity computation, status transition detection
 - **`internal/store/`** — PostgreSQL data access (pgx/v5): upserts, COPY-based bulk insert, partition management (Layer 1 in `postgres.go`, Layer 2 in `l2_store.go`)
@@ -50,8 +50,8 @@ There are no test scripts configured yet.
 ### Database Schema (PostgreSQL)
 
 - **`raw_observations`** — Verbatim source responses (I1): source_type, observed_at, received_at, payload (jsonb), metadata; partitioned by month on received_at
-- **`destinations`** — Theme park resort groups (id, name, slug, latitude/longitude weather centroid)
-- **`parks`** — Individual parks (id, destination_id, name, timezone)
+- **`destinations`** — Theme park resort groups (id, name, slug)
+- **`parks`** — Individual parks (id, destination_id, name, timezone, latitude/longitude weather centroid)
 - **`attractions`** — Rides/attractions (id, park_id, name, external_id)
 - **`wait_times`** — Projected time-series data, partitioned by month (attraction_id, timestamp, status, standby_wait, …, source_observation_id lineage)
 - **`weather_observations`** — Projected current conditions from the weather source, park-keyed, partitioned by month (**PIT-correct**; source_observation_id lineage)
@@ -78,5 +78,5 @@ See `docs/ARCHITECTURE.md` §11 for the point-in-time classification.
 | `API_CONCURRENCY` | `15` | Max concurrent API requests |
 | `API_TIMEOUT` | `10s` | Per-request timeout |
 | `LOG_LEVEL` | `info` | Logging verbosity (debug/info/warn/error) |
-| `WEATHER_API_KEY` | (unset) | OpenWeatherMap One Call 3.0 key. **Presence enables the weather source**; unset = disabled |
-| `WEATHER_POLL_INTERVAL` | `30m` | How often to poll weather (only when enabled) |
+| `WEATHER_API_KEY` | (unset) | OpenWeatherMap One Call 3.0 key ("One Call by Call" subscription). **Presence enables the weather source**; unset = disabled |
+| `WEATHER_POLL_INTERVAL` | `60m` | How often to poll weather (only when enabled). One call per park-cluster; keep under the 1,000/day free tier |

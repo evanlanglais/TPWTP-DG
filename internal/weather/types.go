@@ -1,9 +1,9 @@
 package weather
 
 // OneCallResponse is the subset of the OpenWeatherMap One Call 3.0 response
-// (GET /data/3.0/onecall) that we project. The full verbatim body is persisted to
-// raw_observations (I1), so fields omitted here are never lost — they can be added
-// to the projection later without a re-fetch.
+// (GET /data/3.0/onecall) that we project. A single call returns both current
+// conditions and the hourly forecast. The full verbatim body is persisted to
+// raw_observations (I1), so fields omitted here are never lost.
 type OneCallResponse struct {
 	Lat     float64         `json:"lat"`
 	Lon     float64         `json:"lon"`

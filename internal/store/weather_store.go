@@ -43,65 +43,47 @@ type WeatherForecast struct {
 	SourceObservationID *string
 }
 
-// WeatherTarget is a destination to fetch weather for: its centroid coordinate and the
-// parks that share it (weather is projected to each of them).
-type WeatherTarget struct {
-	DestinationID string
-	Lat           float64
-	Lon           float64
-	ParkIDs       []string
+// WeatherPark is a park with a known coordinate. The collector clusters these into
+// fetch locations (parks within ~2km share one weather call).
+type WeatherPark struct {
+	ParkID string
+	Lat    float64
+	Lon    float64
 }
 
-// UpdateDestinationCoordinates sets a destination's weather centroid.
-func (s *Store) UpdateDestinationCoordinates(ctx context.Context, destID string, lat, lon float64) error {
+// UpdateParkCoordinates sets a park's weather centroid.
+func (s *Store) UpdateParkCoordinates(ctx context.Context, parkID string, lat, lon float64) error {
 	_, err := s.pool.Exec(ctx,
-		"UPDATE destinations SET latitude = $1, longitude = $2 WHERE id = $3", lat, lon, destID)
+		"UPDATE parks SET latitude = $1, longitude = $2 WHERE id = $3", lat, lon, parkID)
 	if err != nil {
-		return fmt.Errorf("updating destination coordinates: %w", err)
+		return fmt.Errorf("updating park coordinates: %w", err)
 	}
 	return nil
 }
 
-// GetWeatherTargets returns one target per destination that has coordinates, each with
-// its list of park IDs. Destinations without coordinates are skipped (fail-safe).
-func (s *Store) GetWeatherTargets(ctx context.Context) ([]WeatherTarget, error) {
+// GetWeatherParks returns every park that has coordinates. Parks without coordinates are
+// skipped (fail-safe). The collector clusters the result into fetch locations.
+func (s *Store) GetWeatherParks(ctx context.Context) ([]WeatherPark, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT d.id, d.latitude, d.longitude, p.id
-		FROM destinations d
-		JOIN parks p ON p.destination_id = d.id
-		WHERE d.latitude IS NOT NULL AND d.longitude IS NOT NULL
-		ORDER BY d.id
+		SELECT id, latitude, longitude
+		FROM parks
+		WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+		ORDER BY id
 	`)
 	if err != nil {
-		return nil, fmt.Errorf("querying weather targets: %w", err)
+		return nil, fmt.Errorf("querying weather parks: %w", err)
 	}
 	defer rows.Close()
 
-	byDest := make(map[string]*WeatherTarget)
-	var order []string
+	var out []WeatherPark
 	for rows.Next() {
-		var destID, parkID string
-		var lat, lon float64
-		if err := rows.Scan(&destID, &lat, &lon, &parkID); err != nil {
-			return nil, fmt.Errorf("scanning weather target: %w", err)
+		var wp WeatherPark
+		if err := rows.Scan(&wp.ParkID, &wp.Lat, &wp.Lon); err != nil {
+			return nil, fmt.Errorf("scanning weather park: %w", err)
 		}
-		t, ok := byDest[destID]
-		if !ok {
-			t = &WeatherTarget{DestinationID: destID, Lat: lat, Lon: lon}
-			byDest[destID] = t
-			order = append(order, destID)
-		}
-		t.ParkIDs = append(t.ParkIDs, parkID)
+		out = append(out, wp)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	targets := make([]WeatherTarget, len(order))
-	for i, destID := range order {
-		targets[i] = *byDest[destID]
-	}
-	return targets, nil
+	return out, rows.Err()
 }
 
 // InsertWeatherObservations inserts current-conditions rows idempotently, ensuring the

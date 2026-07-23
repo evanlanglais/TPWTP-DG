@@ -28,7 +28,7 @@ func Load() (*Config, error) {
 		APITimeout:          10 * time.Second,
 		LogLevel:            "info",
 		WeatherAPIKey:       os.Getenv("WEATHER_API_KEY"),
-		WeatherPollInterval: 30 * time.Minute,
+		WeatherPollInterval: time.Hour,
 	}
 
 	if cfg.DatabaseURL == "" {

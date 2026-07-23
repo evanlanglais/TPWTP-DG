@@ -6,6 +6,10 @@
 -- Weather is fetched once per DESTINATION (parks in a resort are within a few km and
 -- share weather) and projected to each park in that destination, so both tables stay
 -- park-keyed like wait_times for a trivial ML join.
+--
+-- NOTE: migration 009 supersedes the destination-coordinate approach below, moving the
+-- coordinate to `parks` (weather is now fetched per park-cluster). These destination
+-- columns are added here for history and dropped by 009; do not add readers for them.
 
 -- Destination coordinates: the centroid of a destination's attraction locations,
 -- populated during reference sync. Nullable with no default = instant metadata-only

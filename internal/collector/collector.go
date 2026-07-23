@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,64 +17,59 @@ import (
 	"github.com/evanlanglais/tpwtp-dg/internal/weather"
 )
 
-// usDestinations is the set of destination slugs for US-based parks.
+// usDestinations is the set of destination slugs for US-based parks, keyed to the CURRENT
+// themeparks.wiki slugs. After the Six Flags–Cedar Fair merger the API re-slugged those
+// chains (and Universal) to opaque codes; the trailing comments name each so the list
+// stays readable. A stale slug here silently drops the destination on sync and lets
+// PruneUntrackedParks delete its history, so keep these in step with the API.
 var usDestinations = map[string]bool{
 	// Disney
 	"waltdisneyworldresort": true,
-	"disneylandresort":     true,
+	"disneylandresort":      true,
 	// Universal
-	"universalorlando": true,
-	"universalstudios": true, // Hollywood
+	"universalresort_orlando":   true, // Universal Orlando Resort
+	"universalresort_hollywood": true, // Universal Studios Hollywood
 	// SeaWorld / Busch Gardens
 	"seaworldorlandoresort":   true,
 	"seaworldsandiego":        true,
 	"seaworldsanantonio":      true,
 	"buschgardenstampa":       true,
 	"buschgardenswillamsburg": true,
-	// Cedar Fair
-	"cedar-point":        true,
-	"knotts-berry-farm":  true,
-	"kings-island":       true,
-	"kings-dominion":     true,
-	"carowinds":          true,
-	"great-america":      true,
-	"dorney-park":        true,
-	"valleyfair":         true,
-	"michigans-adventure": true,
-	"worlds-of-fun":      true,
+	// Cedar Fair (now under the merged Six Flags / Enchanted Parks families)
+	"sixflags_destination_CP":           true, // Cedar Point
+	"sixflags_destination_KB":           true, // Knott's Berry Farm
+	"sixflags_destination_KI":           true, // Kings Island
+	"sixflags_destination_KD":           true, // Kings Dominion
+	"sixflags_destination_CA":           true, // Carowinds
+	"sixflags_destination_GA":           true, // California's Great America
+	"sixflags_destination_DP":           true, // Dorney Park
+	"enchantedparks_valleyfair":         true, // Valleyfair
+	"enchantedparks_michigansadventure": true, // Michigan's Adventure
+	"enchantedparks_worldsoffun":        true, // Worlds of Fun
 	// Six Flags
-	"six-flags-magic-mountain":    true,
-	"six-flags-great-adventure":   true,
-	"six-flags-great-america":     true,
-	"six-flags-over-texas":        true,
-	"six-flags-over-georgia":      true,
-	"six-flags-fiesta-texas":      true,
-	"six-flags-new-england":       true,
-	"six-flags-america":           true,
-	"six-flags-discovery-kingdom": true,
-	"six-flags-st-louis":          true,
-	"six-flags-great-escape":      true,
-	"six-flags-darien-lake":       true,
-	"six-flags-frontier-city":     true,
-	"six-flags-white-water-atlanta": true,
-	// Water parks
-	"hurricane-harbor-oklahoma-city": true,
-	"hurricane-harbor-rockford":      true,
-	"hurricane-harbor-splashtown":    true,
-	"hurricane-harbor-concord":       true,
-	"hurricane-harbor-phoenix":       true,
-	"schlitterbahn-nb":               true,
-	"schlitterbahn-gv":               true,
+	"sixflags_destination_SFMM": true, // Six Flags Magic Mountain
+	"sixflags_destination_GADV": true, // Six Flags Great Adventure
+	"sixflags_destination_SFGR": true, // Six Flags Great America (IL)
+	"sixflags_destination_SFOT": true, // Six Flags Over Texas
+	"sixflags_destination_SFOG": true, // Six Flags Over Georgia
+	"sixflags_destination_SFFT": true, // Six Flags Fiesta Texas
+	"sixflags_destination_SFNE": true, // Six Flags New England
+	"six-flags-america":         true, // Six Flags America
+	"sixflags_destination_SFDK": true, // Six Flags Discovery Kingdom
+	"sixflags_destination_SFSL": true, // Six Flags St. Louis
+	"sixflags_destination_SFGE": true, // Six Flags Great Escape
+	"sixflags_destination_SFDL": true, // Six Flags Darien Lake
+	"sixflags_destination_SFFC": true, // Six Flags Frontier City
 	// Independent / Other
-	"dollywood":        true,
-	"hersheypark":      true,
-	"silverdollarcity": true,
-	"kennywood":        true,
-	"knoebels":         true,
-	"legolandcaliforniaresort":              true,
-	"legolandorlandoresort":                 true,
-	"legolandnewyorkdestination":            true,
-	"peppapigthemeparkfloridadestination":   true,
+	"dollywood":                           true,
+	"hersheypark":                         true,
+	"silverdollarcity":                    true,
+	"kennywood":                           true,
+	"knoebels":                            true,
+	"legolandcaliforniaresort":            true,
+	"legolandorlandoresort":               true,
+	"legolandnewyorkdestination":          true,
+	"peppapigthemeparkfloridadestination": true,
 }
 
 // Collector polls the themeparks.wiki API and writes wait times to the store.
@@ -171,7 +167,6 @@ func (c *Collector) syncReferenceData(ctx context.Context) error {
 	var destinations []store.Destination
 	var parks []store.Park
 	var parkIDs []string
-	parkToDest := make(map[string]string) // park ID -> destination ID (for weather centroids)
 
 	for _, d := range destResp.Destinations {
 		if !usDestinations[d.Slug] {
@@ -184,7 +179,6 @@ func (c *Collector) syncReferenceData(ctx context.Context) error {
 		})
 		for _, p := range d.Parks {
 			parkIDs = append(parkIDs, p.ID)
-			parkToDest[p.ID] = d.ID
 			// Timezone will be filled in when we fetch children
 			parks = append(parks, store.Park{
 				ID:            p.ID,
@@ -282,15 +276,8 @@ func (c *Collector) syncReferenceData(ctx context.Context) error {
 		close(results)
 	}()
 
-	// destCoord accumulates located-attraction coordinates per destination.
-	type destCoord struct {
-		latSum, lonSum float64
-		count          int
-	}
-
 	var totalAttractions int
 	var parkUpdates []store.Park
-	destCoords := make(map[string]*destCoord)
 	for pc := range results {
 		if len(pc.attrs) > 0 {
 			if err := c.store.UpsertAttractions(ctx, pc.attrs); err != nil {
@@ -304,17 +291,14 @@ func (c *Collector) syncReferenceData(ctx context.Context) error {
 			ID:       pc.parkID,
 			Timezone: pc.timezone,
 		})
-		// Accumulate this park's located attractions into its destination's centroid.
+		// Store the park's own weather centroid (mean of its attraction locations). A
+		// park with no located attractions keeps NULL coords and is skipped by the
+		// weather poll (fail-safe). Parks are later clustered into fetch locations.
 		if pc.locCount > 0 {
-			if destID := parkToDest[pc.parkID]; destID != "" {
-				acc := destCoords[destID]
-				if acc == nil {
-					acc = &destCoord{}
-					destCoords[destID] = acc
-				}
-				acc.latSum += pc.latSum
-				acc.lonSum += pc.lonSum
-				acc.count += pc.locCount
+			lat := pc.latSum / float64(pc.locCount)
+			lon := pc.lonSum / float64(pc.locCount)
+			if err := c.store.UpdateParkCoordinates(ctx, pc.parkID, lat, lon); err != nil {
+				slog.Error("failed to update park coordinates", "park_id", pc.parkID, "error", err)
 			}
 		}
 	}
@@ -323,17 +307,6 @@ func (c *Collector) syncReferenceData(ctx context.Context) error {
 	for _, pu := range parkUpdates {
 		if err := c.store.UpdateParkTimezone(ctx, pu.ID, pu.Timezone); err != nil {
 			slog.Error("failed to update park timezone", "park_id", pu.ID, "error", err)
-		}
-	}
-
-	// Store each destination's weather centroid (mean of its attraction locations).
-	// Destinations with no located attractions keep NULL coords and are skipped by the
-	// weather poll (fail-safe).
-	for destID, acc := range destCoords {
-		lat := acc.latSum / float64(acc.count)
-		lon := acc.lonSum / float64(acc.count)
-		if err := c.store.UpdateDestinationCoordinates(ctx, destID, lat, lon); err != nil {
-			slog.Error("failed to update destination coordinates", "destination_id", destID, "error", err)
 		}
 	}
 
@@ -560,71 +533,131 @@ func (c *Collector) writeRawObservation(ctx context.Context, parkID, observation
 	})
 }
 
-// pollAllWeather fetches weather for every destination with coordinates and projects
-// it to that destination's parks. Runs on its own (slower) ticker; it feeds no Metric,
-// so it does NOT trigger Layer 2 processing.
+// weatherClusterKm is the distance below which two parks share a single weather fetch.
+// It matches OpenWeather's ~2km grid resolution: closer parks fall in the same cell and
+// would return identical data, so fetching them separately is wasted calls.
+const weatherClusterKm = 2.0
+
+// weatherCluster is a group of co-located parks served by one weather fetch, at the
+// cluster's mean coordinate.
+type weatherCluster struct {
+	Lat, Lon float64
+	ParkIDs  []string
+}
+
+// clusterParks groups parks into fetch locations by greedy single-linkage: a park joins
+// the first existing cluster within thresholdKm of that cluster's anchor, else it starts a
+// new cluster. Co-located parks (a typical resort) collapse to one; genuinely spread-out
+// resorts (Walt Disney World, Universal Orlando) split into several. The fetch coordinate
+// is the cluster's mean.
+func clusterParks(parks []store.WeatherPark, thresholdKm float64) []weatherCluster {
+	type acc struct {
+		anchorLat, anchorLon float64
+		latSum, lonSum       float64
+		parkIDs              []string
+	}
+	var accs []*acc
+	for _, p := range parks {
+		var target *acc
+		for _, a := range accs {
+			if haversineKm(p.Lat, p.Lon, a.anchorLat, a.anchorLon) <= thresholdKm {
+				target = a
+				break
+			}
+		}
+		if target == nil {
+			target = &acc{anchorLat: p.Lat, anchorLon: p.Lon}
+			accs = append(accs, target)
+		}
+		target.latSum += p.Lat
+		target.lonSum += p.Lon
+		target.parkIDs = append(target.parkIDs, p.ParkID)
+	}
+	clusters := make([]weatherCluster, len(accs))
+	for i, a := range accs {
+		n := float64(len(a.parkIDs))
+		clusters[i] = weatherCluster{Lat: a.latSum / n, Lon: a.lonSum / n, ParkIDs: a.parkIDs}
+	}
+	return clusters
+}
+
+// haversineKm is the great-circle distance between two lat/lon points, in kilometers.
+func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
+	const r = 6371.0
+	rl1 := lat1 * math.Pi / 180
+	rl2 := lat2 * math.Pi / 180
+	dlat := (lat2 - lat1) * math.Pi / 180
+	dlon := (lon2 - lon1) * math.Pi / 180
+	h := math.Sin(dlat/2)*math.Sin(dlat/2) + math.Cos(rl1)*math.Cos(rl2)*math.Sin(dlon/2)*math.Sin(dlon/2)
+	return 2 * r * math.Asin(math.Sqrt(h))
+}
+
+// pollAllWeather clusters parks into fetch locations and polls each. Runs on its own
+// (slower) ticker; it feeds no Metric, so it does NOT trigger Layer 2 processing.
 func (c *Collector) pollAllWeather(ctx context.Context) {
 	start := time.Now()
 
-	targets, err := c.store.GetWeatherTargets(ctx)
+	parks, err := c.store.GetWeatherParks(ctx)
 	if err != nil {
-		slog.Error("failed to get weather targets", "error", err)
+		slog.Error("failed to get weather parks", "error", err)
 		return
 	}
-	if len(targets) == 0 {
-		slog.Warn("no destinations have coordinates; skipping weather poll")
+	clusters := clusterParks(parks, weatherClusterKm)
+	if len(clusters) == 0 {
+		slog.Warn("no parks have coordinates; skipping weather poll")
 		return
 	}
 
 	var (
-		wg          sync.WaitGroup
-		totalObs    atomic.Int64
-		errorCount  atomic.Int64
-		destsPolled atomic.Int64
+		wg             sync.WaitGroup
+		totalObs       atomic.Int64
+		errorCount     atomic.Int64
+		clustersPolled atomic.Int64
 	)
 
-	for _, t := range targets {
+	for _, cl := range clusters {
 		wg.Add(1)
-		go func(target store.WeatherTarget) {
+		go func(cluster weatherCluster) {
 			defer wg.Done()
-			n, err := c.pollDestinationWeather(ctx, target)
+			n, err := c.pollClusterWeather(ctx, cluster)
 			if err != nil {
-				slog.Error("failed to poll weather", "destination_id", target.DestinationID, "error", err)
+				slog.Error("failed to poll weather", "lat", cluster.Lat, "lon", cluster.Lon, "error", err)
 				errorCount.Add(1)
 				return
 			}
-			destsPolled.Add(1)
+			clustersPolled.Add(1)
 			totalObs.Add(int64(n))
-		}(t)
+		}(cl)
 	}
 
 	wg.Wait()
 
 	slog.Info("weather poll complete",
-		"destinations_polled", destsPolled.Load(),
+		"clusters_polled", clustersPolled.Load(),
+		"parks", len(parks),
 		"observations_recorded", totalObs.Load(),
 		"errors", errorCount.Load(),
 		"duration", time.Since(start).Round(time.Millisecond),
 	)
 }
 
-// pollDestinationWeather fetches weather for one destination and projects it. Mirrors
-// pollPark: the raw response is persisted BEFORE projection and even on a failed fetch
-// (invariant I1). Current conditions become PIT-correct weather_observations; the next
-// ~6h of hourly forecast become bi-temporal weather_forecasts (issued_at = now). Every
-// projected row is written for each park in the destination. Returns the number of
-// current-conditions rows inserted.
-func (c *Collector) pollDestinationWeather(ctx context.Context, target store.WeatherTarget) (int, error) {
-	res, err := c.weather.FetchWithRaw(ctx, target.Lat, target.Lon)
+// pollClusterWeather fetches weather once for a cluster of co-located parks and projects
+// it to each of them. Mirrors pollPark: the One Call 3.0 response (current + hourly in one
+// call) is persisted verbatim to raw_observations BEFORE projection and even on a failed
+// fetch (invariant I1). Current conditions become PIT-correct weather_observations; the
+// next ~6h of hourly forecast become bi-temporal weather_forecasts (issued_at = now, the
+// as-of key). Every projected row is written for each park in the cluster, all sharing one
+// source_observation_id. Returns the number of current-conditions rows inserted.
+func (c *Collector) pollClusterWeather(ctx context.Context, cluster weatherCluster) (int, error) {
+	res, err := c.weather.FetchWithRaw(ctx, cluster.Lat, cluster.Lon)
 	now := time.Now().UTC()
 
 	// Persist raw before projection (I1). A failed fetch is recorded too (gap marker).
 	observationID := newUUID()
-	if werr := c.writeRawWeatherObservation(ctx, target, observationID, now, res, err); werr != nil {
-		slog.Error("failed to write raw weather observation", "destination_id", target.DestinationID, "error", werr)
+	if werr := c.writeRawWeatherObservation(ctx, cluster, observationID, now, res, err); werr != nil {
+		slog.Error("failed to write raw weather observation", "lat", cluster.Lat, "lon", cluster.Lon, "error", werr)
 		observationID = "" // don't stamp a dangling lineage pointer
 	}
-
 	if err != nil {
 		return 0, err
 	}
@@ -633,7 +666,7 @@ func (c *Collector) pollDestinationWeather(ctx context.Context, target store.Wea
 		return 0, nil
 	}
 
-	// Lineage pointer shared by every row projected from this poll's raw response.
+	// Lineage pointer shared by every row projected from this fetch.
 	var obsIDPtr *string
 	if observationID != "" {
 		obsIDPtr = &observationID
@@ -645,7 +678,7 @@ func (c *Collector) pollDestinationWeather(ctx context.Context, target store.Wea
 	// Current conditions — stamped at the observation's valid time (PIT-correct).
 	if resp.Current != nil {
 		obsTime := time.Unix(resp.Current.Dt, 0).UTC()
-		for _, parkID := range target.ParkIDs {
+		for _, parkID := range cluster.ParkIDs {
 			observations = append(observations, store.WeatherObservation{
 				ParkID:              parkID,
 				Timestamp:           obsTime,
@@ -662,8 +695,8 @@ func (c *Collector) pollDestinationWeather(ctx context.Context, target store.Wea
 		}
 	}
 
-	// Forecast — hourly entries strictly in the future, up to +6h. issued_at = now is
-	// the PIT/as-of key; valid_at is the future time each entry describes.
+	// Forecast — hourly entries strictly in the future, up to +6h. issued_at = now is the
+	// PIT/as-of key; valid_at is the future time each entry describes.
 	horizonCap := now.Add(6 * time.Hour)
 	for _, h := range resp.Hourly {
 		validAt := time.Unix(h.Dt, 0).UTC()
@@ -671,7 +704,7 @@ func (c *Collector) pollDestinationWeather(ctx context.Context, target store.Wea
 			continue
 		}
 		horizonMin := int(validAt.Sub(now).Round(time.Minute) / time.Minute)
-		for _, parkID := range target.ParkIDs {
+		for _, parkID := range cluster.ParkIDs {
 			forecasts = append(forecasts, store.WeatherForecast{
 				ParkID:              parkID,
 				IssuedAt:            now,
@@ -698,13 +731,15 @@ func (c *Collector) pollDestinationWeather(ctx context.Context, target store.Wea
 }
 
 // writeRawWeatherObservation persists the verbatim weather response (invariant I1),
-// mirroring writeRawObservation. res may be nil (transport error) and its body may be
-// non-JSON; both are handled so the jsonb payload only ever receives valid JSON.
-func (c *Collector) writeRawWeatherObservation(ctx context.Context, target store.WeatherTarget, observationID string, now time.Time, res *weather.Result, fetchErr error) error {
+// mirroring writeRawObservation. One Call 3.0 returns current + forecast in one fetch, so
+// it is one raw row per cluster per poll (source_type "openweather_onecall"). res may be
+// nil (transport error) and its body may be non-JSON; both are handled so the jsonb
+// payload only ever receives valid JSON.
+func (c *Collector) writeRawWeatherObservation(ctx context.Context, cluster weatherCluster, observationID string, now time.Time, res *weather.Result, fetchErr error) error {
 	meta := map[string]any{
-		"destination_id": target.DestinationID,
-		"lat":            target.Lat,
-		"lon":            target.Lon,
+		"lat":        cluster.Lat,
+		"lon":        cluster.Lon,
+		"park_count": len(cluster.ParkIDs),
 	}
 	var payload json.RawMessage
 
