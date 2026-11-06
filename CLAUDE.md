@@ -2,6 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Project Knowledge (Xynon Brain)
+
+Brain project: park-predictor
+Brain repo: TPWTP-DG
+
+Project goals, status, decisions, infrastructure and repo gotchas live in the Xynon Brain vault, not in this repo. This repo is one of several in the project.
+- Start here: `Claude/Projects/park-predictor/index.md`
+- This repo: `Claude/Projects/park-predictor/repos/TPWTP-DG.md`
+- Decisions: `Claude/Projects/park-predictor/decisions.md`
+- External context: `Claude/Projects/park-predictor/notes/`
+
 ## Project Overview
 
 TPWTP-DG (Theme Park Wait Time Predictor - Data Gatherer) is a Go service that polls the [themeparks.wiki REST API](https://api.themeparks.wiki/v1) every 5 minutes to collect ride wait times from a US-park allowlist, storing them in PostgreSQL.
